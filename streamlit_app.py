@@ -226,60 +226,22 @@ def extract_citations_from_response(response_text, agent):
     return citations
 
 def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
-    """Display enhanced source citations"""
+    """Display which tools were used"""
     st.markdown("---")
-    st.subheader("📚 Sources & References")
-    
-    # Extract citations from response
-    citations = extract_citations_from_response(response_text, None)
-    
-    # Display active tools
-    active_tools = []
-    if use_knowledge_base:
-        active_tools.append("🔍 Knowledge Base")
-    if use_web_search:
-        active_tools.append("🌐 Web Search")
-    
-    st.info(f"**Active Tools**: {', '.join(active_tools)}")
-    
-    # Enhanced reference section with actual sources
-    with st.expander("📖 Detailed References", expanded=True):
-        if citations['web_sources']:
-            st.markdown("### 🌐 Web Search Sources:")
-            for source in citations['web_sources']:
-                st.markdown(f"- **[{source['name']}]({source['url']})**")
-                if source['description']:
-                    st.markdown(f"  - {source['description']}")
-        
-        if citations['knowledge_base_sources']:
-            st.markdown("### 🔍 Knowledge Base Sources:")
-            for source in citations['knowledge_base_sources']:
-                st.markdown(f"- **Document:** {source['document']}")
-                st.markdown(f"  - **Section:** {source['section']}")
-                if source['description']:
-                    st.markdown(f"  - **Content:** {source['description']}")
-        
-        # Simple message if no specific citations found
-        if not citations['web_sources'] and not citations['knowledge_base_sources']:
-            st.markdown("*No specific source citations were extracted from the response.*")
+    st.subheader("🔧 Tools Used")
     
     # Tool usage summary
-    st.markdown("---")
     col_ref1, col_ref2 = st.columns(2)
     
     with col_ref1:
         if use_knowledge_base:
             st.success("✅ Knowledge Base Used")
-            if citations['knowledge_base_sources']:
-                st.info(f"📊 {len(citations['knowledge_base_sources'])} documents referenced")
         else:
             st.info("➖ Knowledge Base Not Used")
     
     with col_ref2:
         if use_web_search:
             st.success("✅ Web Search Used")
-            if citations['web_sources']:
-                st.info(f"🔗 {len(citations['web_sources'])} web sources found")
         else:
             st.info("➖ Web Search Not Used")
 
