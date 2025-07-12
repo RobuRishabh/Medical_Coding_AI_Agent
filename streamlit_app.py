@@ -138,36 +138,152 @@ def initialize_model():
         return None
 
 # ───────────────────────────────────────────────
-# Initialize Agent
+# Initialize Agent with dynamic tools
 # ───────────────────────────────────────────────
 @st.cache_resource
-def initialize_agent():
+def initialize_base_agent():
     llm = initialize_model()
+    if not llm:
+        return None, None
+    
+    try:
+        logger.info("Creating base agent components...")
+        system_prompt = load_system_prompt()
+        logger.info("Base agent components created successfully")
+        return llm, system_prompt
+    except Exception as e:
+        logger.error(f"Failed to create base agent: {e}")
+        st.error(f"Failed to create base agent: {e}")
+        return None, None
+
+def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
+    """Create agent with selected tools"""
+    llm, system_prompt = initialize_base_agent()
     if not llm:
         return None
     
     try:
-        logger.info("Creating ToolCallingAgent with retriever tools...")
+        # Select tools based on user preferences
+        selected_tools = []
+        if use_web_search:  # Always include web search
+            selected_tools.append(web_search_tool)
+        if use_knowledge_base:
+            selected_tools.append(knowledge_base_retriever)
+        
+        logger.info(f"Creating ToolCallingAgent with {len(selected_tools)} tools...")
         agent = ToolCallingAgent(
-            tools=[knowledge_base_retriever, web_search_tool],
+            tools=selected_tools,
             model=llm,
             max_steps=3
         )
         
-        # Set system prompt
-        system_prompt = load_system_prompt()
-        agent.prompt_templates["system_prompt"] = system_prompt
+        # Enhanced system prompt with citation requirements
+        enhanced_system_prompt = system_prompt
         
-        logger.info("Agent created successfully")
+        # Set enhanced system prompt
+        agent.prompt_templates["system_prompt"] = enhanced_system_prompt
+        
+        logger.info("Dynamic agent created successfully")
         return agent
     except Exception as e:
-        logger.error(f"Failed to create agent: {e}")
-        st.error(f"Failed to create agent: {e}")
+        logger.error(f"Failed to create dynamic agent: {e}")
+        st.error(f"Failed to create dynamic agent: {e}")
         return None
 
-# ───────────────────────────────────────────────
-# MAIN STREAMLIT APP
-# ───────────────────────────────────────────────
+def extract_citations_from_response(response_text, agent):
+    """Extract and format citations from agent response"""
+    citations = {
+        'web_sources': [],
+        'knowledge_base_sources': []
+    }
+    
+    # Try to extract citations from the response text
+    if "**Sources:**" in response_text:
+        # Parse existing citations
+        sources_section = response_text.split("**Sources:**")[1] if "**Sources:**" in response_text else ""
+        
+        # Extract web sources
+        import re
+        web_pattern = r'- Web Search: \[([^\]]+)\]\(([^)]+)\)(.*)'
+        web_matches = re.findall(web_pattern, sources_section)
+        for match in web_matches:
+            citations['web_sources'].append({
+                'name': match[0],
+                'url': match[1],
+                'description': match[2].strip(' -')
+            })
+        
+        # Extract knowledge base sources
+        kb_pattern = r'- Knowledge Base: ([^,]+), Section: "([^"]+)"(.*)'
+        kb_matches = re.findall(kb_pattern, sources_section)
+        for match in kb_matches:
+            citations['knowledge_base_sources'].append({
+                'document': match[0],
+                'section': match[1],
+                'description': match[2].strip(' -')
+            })
+    
+    return citations
+
+def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
+    """Display enhanced source citations"""
+    st.markdown("---")
+    st.subheader("📚 Sources & References")
+    
+    # Extract citations from response
+    citations = extract_citations_from_response(response_text, None)
+    
+    # Display active tools
+    active_tools = []
+    if use_knowledge_base:
+        active_tools.append("🔍 Knowledge Base")
+    if use_web_search:
+        active_tools.append("🌐 Web Search")
+    
+    st.info(f"**Active Tools**: {', '.join(active_tools)}")
+    
+    # Enhanced reference section with actual sources
+    with st.expander("📖 Detailed References", expanded=True):
+        if citations['web_sources']:
+            st.markdown("### 🌐 Web Search Sources:")
+            for source in citations['web_sources']:
+                st.markdown(f"- **[{source['name']}]({source['url']})**")
+                if source['description']:
+                    st.markdown(f"  - {source['description']}")
+        
+        if citations['knowledge_base_sources']:
+            st.markdown("### 🔍 Knowledge Base Sources:")
+            for source in citations['knowledge_base_sources']:
+                st.markdown(f"- **Document:** {source['document']}")
+                st.markdown(f"  - **Section:** {source['section']}")
+                if source['description']:
+                    st.markdown(f"  - **Content:** {source['description']}")
+        
+        # Simple message if no specific citations found
+        if not citations['web_sources'] and not citations['knowledge_base_sources']:
+            st.markdown("*No specific source citations were extracted from the response.*")
+    
+    # Tool usage summary
+    st.markdown("---")
+    col_ref1, col_ref2 = st.columns(2)
+    
+    with col_ref1:
+        if use_knowledge_base:
+            st.success("✅ Knowledge Base Used")
+            if citations['knowledge_base_sources']:
+                st.info(f"📊 {len(citations['knowledge_base_sources'])} documents referenced")
+        else:
+            st.info("➖ Knowledge Base Not Used")
+    
+    with col_ref2:
+        if use_web_search:
+            st.success("✅ Web Search Used")
+            if citations['web_sources']:
+                st.info(f"🔗 {len(citations['web_sources'])} web sources found")
+        else:
+            st.info("➖ Web Search Not Used")
+
+# Update the main function to use enhanced source display
 def main():
     # Header
     st.title("🩺 CPC Medical Coding Assistant")
@@ -186,9 +302,9 @@ def main():
         """)
         
         st.header("🔧 Status")
-        # Initialize agent
-        agent = initialize_agent()
-        if agent:
+        # Check if base components are ready
+        llm, system_prompt = initialize_base_agent()
+        if llm and system_prompt:
             st.success("✅ Agent Ready")
         else:
             st.error("❌ Agent Failed to Initialize")
@@ -196,58 +312,72 @@ def main():
     
     # Main interface
     col1, col2 = st.columns([2, 1])
-    
+
     with col1:
         st.header("💬 Ask Your Question")
+        
+        # Initialize session state for question if not exists
+        if 'current_question' not in st.session_state:
+            st.session_state.current_question = ""
         
         # Input area
         question = st.text_area(
             "Enter your medical coding question:",
             placeholder="e.g., What is the CPT code for a routine colonoscopy?",
-            height=100
+            height=100,
+            value=st.session_state.current_question
         )
+        
+        # Update session state when text area changes
+        if question != st.session_state.current_question:
+            st.session_state.current_question = question
         
         # Example questions
         st.subheader("💡 Example Questions")
         examples = [
-            "What is the CPT code for a routine colonoscopy?",
             "How do I code a chest X-ray with interpretation?",
             "What ICD-10 code should I use for Type 2 diabetes?",
             "What's the difference between CPT 99213 and 99214?",
-            "How do I code a telehealth visit?"
         ]
         
         for i, example in enumerate(examples):
             if st.button(f"📝 {example}", key=f"example_{i}"):
-                question = example
+                st.session_state.current_question = example
                 st.rerun()
-    
+
     with col2:
         st.header("⚙️ Options")
+        # Web search is always enabled (can't be turned off)
+        st.markdown("🌐 **Web Search**: Always Enabled")
+        st.info("Web search is always active to provide the most current information.")
+        use_web_search = True  # Always True
         
         # Search options
         use_knowledge_base = st.checkbox("🔍 Search Knowledge Base", value=True)
-        use_web_search = st.checkbox("🌐 Search Web", value=False)
-        
+        st.info("Knowledge base search is optional. Uncheck to skip searching the embedded documents.")
         # Display options
         show_sources = st.checkbox("📖 Show Sources", value=True)
-        
-        st.markdown("---")
-        st.markdown("**💡 Tip:** Use specific medical terms for better results")
-    
+
     # Submit button
     if st.button("🚀 Get Answer", type="primary", use_container_width=True):
-        if not question.strip():
+        if not st.session_state.current_question.strip():
             st.warning("Please enter a question!")
             return
         
         # Show processing
         with st.spinner("🔄 Processing your question..."):
             try:
-                logger.info(f"Processing query: {question}")
+                logger.info(f"Processing query: {st.session_state.current_question}")
+                logger.info(f"Using tools - Knowledge Base: {use_knowledge_base}, Web Search: {use_web_search}")
+                
+                # Create agent with selected tools
+                agent = create_dynamic_agent(use_knowledge_base, use_web_search)
+                if not agent:
+                    st.error("Failed to create agent with selected tools")
+                    return
                 
                 # Get response from agent
-                response = agent.run(question)
+                response = agent.run(st.session_state.current_question)
                 
                 # Display results
                 st.markdown("---")
@@ -256,14 +386,14 @@ def main():
                 # Format and display response
                 if isinstance(response, str):
                     st.markdown(response)
+                    response_text = response
                 else:
                     st.write(response)
+                    response_text = str(response)
                 
-                # Show additional info if requested
+                # Show enhanced sources and references if requested
                 if show_sources:
-                    st.markdown("---")
-                    st.subheader("📚 Sources")
-                    st.info("Sources: Internal knowledge base and web search results")
+                    display_enhanced_sources(response_text, use_knowledge_base, use_web_search)
                 
                 logger.info("Query processed successfully")
                 

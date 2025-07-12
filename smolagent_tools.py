@@ -33,11 +33,13 @@ VECTOR_DB_DIR = Path("Outputs/vector_db")
 # ───────────────────────────────────────────────
 class KnowledgeBaseRetriever(Tool):
     name = "knowledge_base_retriever"
-    description = "Uses semantic search to retrieve relevant medical coding information from the embedded PDF knowledge base. Use this to find specific coding guidelines, procedures, and medical coding rules."
+    description = "Uses semantic search to retrieve relevant medical coding information from the embedded " \
+    "PDF knowledge base. Use this to find specific coding guidelines, procedures, and medical coding rules."
     inputs = {
         "query": {
             "type": "string",
-            "description": "The medical coding question or search term. Use descriptive terms related to medical procedures, diagnoses, or coding guidelines rather than questions.",
+            "description": "The medical coding question or search term. Use descriptive terms related "
+            "to medical procedures, diagnoses, or coding guidelines rather than questions.",
         }
     }
     output_type = "string"
@@ -117,11 +119,13 @@ class KnowledgeBaseRetriever(Tool):
 # ───────────────────────────────────────────────
 class WebSearchTool(Tool):
     name = "web_search"
-    description = "Searches the web for current medical coding information when the knowledge base doesn't have sufficient information. Use this for recent updates, clarifications, or additional context."
+    description = "Searches the web for current medical coding information when the knowledge base doesn't " \
+    "have sufficient information. Use this for recent updates, clarifications, or additional context."
     inputs = {
         "query": {
             "type": "string",
-            "description": "The medical coding question or search term to find current information on the web. Include terms like 'medical coding', 'CPT', 'ICD-10', etc.",
+            "description": "The medical coding question or search term to find current information on the web. "
+            "Include terms like 'medical coding', 'CPT', 'ICD-10', etc.",
         }
     }
     output_type = "string"
