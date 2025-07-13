@@ -87,8 +87,24 @@ class SafeLLMWrapper:
 
     def generate(self, messages, **kwargs):
         try:
+            # Filter out Gemini-specific arguments that OpenAI doesn't support
+            filtered_kwargs = {}
+            openai_supported_args = {
+                'temperature', 'max_tokens', 'top_p', 'frequency_penalty', 
+                'presence_penalty', 'stop', 'stream', 'logit_bias', 'user'
+            }
+            
+            for key, value in kwargs.items():
+                if key in openai_supported_args:
+                    filtered_kwargs[key] = value
+                elif key == 'stop_sequences':
+                    # Convert Gemini's stop_sequences to OpenAI's stop
+                    filtered_kwargs['stop'] = value
+                else:
+                    logger.warning(f"Filtering out unsupported parameter: {key}")
+            
             converted_messages = self.convert_messages(messages)
-            response = self.llm.invoke(converted_messages, **kwargs)
+            response = self.llm.invoke(converted_messages, **filtered_kwargs)
             
             # Post-process response to fix code block formatting
             content = getattr(response, "content", str(response))
@@ -150,18 +166,18 @@ class SafeLLMWrapper:
 # ───────────────────────────────────────────────
 @st.cache_resource
 def initialize_model():
-    logger.info("Initializing Google Gemini language model...")
+    logger.info("Initializing OpenAI language model...")
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        raw_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+        from langchain_openai import ChatOpenAI
+        raw_llm = ChatOpenAI(
+            model=os.getenv("AGENT_MODEL"),
             temperature=0.2,
-            google_api_key=os.getenv("GEMINI_API_KEY")
+            openai_api_key=os.getenv("OPENAI_API_KEY")
         )
-        logger.info("Google Gemini model initialized successfully")
+        logger.info("OpenAI model initialized successfully")
         return SafeLLMWrapper(raw_llm)
     except Exception as e:
-        logger.error(f"Failed to initialize Google Gemini model: {e}")
+        logger.error(f"Failed to initialize OpenAI model: {e}")
         st.error(f"Failed to initialize model: {e}")
         return None
 
@@ -422,6 +438,9 @@ def practice_test_interface():
             help="Upload the practice test with answers"
         )
     
+    # Add checkbox to skip extraction
+    skip_extraction = st.checkbox("Skip PDF extraction (use cached data)", value=False)
+    
     # Agent configuration
     st.subheader("🔧 Agent Configuration")
     col1, col2, col3 = st.columns(3)
@@ -435,56 +454,121 @@ def practice_test_interface():
     
     # Run test button
     if st.button("🚀 Run Automated Test", type="primary"):
-        if test_file and answers_file:
+        if skip_extraction:
+            # Skip file upload requirement and PDF processing
+            st.info("Using cached test data...")
+            
             # Check if base components are ready
             llm, system_prompt = initialize_base_agent()
             if not llm or not system_prompt:
                 st.error("❌ Agent Failed to Initialize")
                 return
             
-            # Save uploaded files
-            test_path = f"temp_test_{datetime.now().timestamp()}.pdf"
-            answers_path = f"temp_answers_{datetime.now().timestamp()}.pdf"
-            
-            with open(test_path, "wb") as f:
-                f.write(test_file.read())
-            with open(answers_path, "wb") as f:
-                f.write(answers_file.read())
-            
-            # Run automated test
-            with st.spinner("Running automated test..."):
-                # Updated import path
-                from scripts.test_runner import AutomatedTestRunner
-                
-                agent_config = {
-                    'model': 'gemini-2.0-flash',
-                    'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
-                    'temperature': temperature
-                }
-                
-                runner = AutomatedTestRunner(agent_config)
-                results = runner.run_complete_test(test_path, answers_path)
-                
-                # Display results
-                st.success(f"Test completed! Score: {results['score_percentage']:.1f}%")
-                
-                # Generate and display report
-                # Updated import path
-                from scripts.results_generator import ResultsGenerator
-                generator = ResultsGenerator(results)
-                report = generator.generate_comprehensive_report()
-                
-                st.markdown(report)
-                
-                # Download links
-                st.download_button(
-                    "📥 Download Full Report",
-                    data=report,
-                    file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                    mime="text/markdown"
-                )
+            # Run automated test with cached data
+            with st.spinner("Running automated test with cached data..."):
+                try:
+                    from scripts.test_runner import AutomatedTestRunner
+                    
+                    agent_config = {
+                        'model': os.getenv("AGENT_MODEL"),
+                        'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
+                        'temperature': temperature
+                    }
+                    
+                    runner = AutomatedTestRunner(agent_config)
+                    results = runner.run_test_with_cached_data()
+                    
+                    # Check if results is None
+                    if results is None:
+                        st.error("❌ Test runner returned no results")
+                        return
+                    
+                    # Display results
+                    st.success(f"Test completed! Score: {results['score_percentage']:.1f}%")
+                    
+                    # Generate and display report
+                    from scripts.results_generator import ResultsGenerator
+                    generator = ResultsGenerator(results)
+                    report = generator.generate_comprehensive_report()
+                    
+                    st.markdown(report)
+                    
+                    # Download links
+                    st.download_button(
+                        "📥 Download Full Report",
+                        data=report,
+                        file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                        mime="text/markdown"
+                    )
+                    
+                except FileNotFoundError as e:
+                    st.error(f"❌ Cached data not found: {str(e)}")
+                    st.info("Please run the test with PDFs first to generate cached data.")
+                except Exception as e:
+                    st.error(f"❌ Error running test: {str(e)}")
+                    st.info("Please check the logs for more details.")
         else:
-            st.error("Please upload both test file and answer key")
+            # Original logic for processing PDFs
+            if test_file and answers_file:
+                # Check if base components are ready
+                llm, system_prompt = initialize_base_agent()
+                if not llm or not system_prompt:
+                    st.error("❌ Agent Failed to Initialize")
+                    return
+                
+                # Save uploaded files
+                test_path = f"temp_test_{datetime.now().timestamp()}.pdf"
+                answers_path = f"temp_answers_{datetime.now().timestamp()}.pdf"
+                
+                with open(test_path, "wb") as f:
+                    f.write(test_file.read())
+                with open(answers_path, "wb") as f:
+                    f.write(answers_file.read())
+                
+                # Run automated test
+                with st.spinner("Running automated test..."):
+                    from scripts.test_runner import AutomatedTestRunner
+                    
+                    agent_config = {
+                        'model': os.getenv("AGENT_MODEL"),  # Changed from gemini-2.0-flash to OpenAI model
+                        'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
+                        'temperature': temperature
+                    }
+                    
+                    try:
+                        runner = AutomatedTestRunner(agent_config)
+                        results = runner.run_complete_test(test_path, answers_path)
+                        
+                        # Display results
+                        st.success(f"Test completed! Score: {results['score_percentage']:.1f}%")
+                        
+                        # Generate and display report
+                        from scripts.results_generator import ResultsGenerator
+                        generator = ResultsGenerator(results)
+                        report = generator.generate_comprehensive_report()
+                        
+                        st.markdown(report)
+                        
+                        # Download links
+                        st.download_button(
+                            "📥 Download Full Report",
+                            data=report,
+                            file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                            mime="text/markdown"
+                        )
+                    finally:
+                        # Clean up temporary files
+                        try:
+                            if os.path.exists(test_path):
+                                os.remove(test_path)
+                                logger.info(f"Cleaned up temporary file: {test_path}")
+                            if os.path.exists(answers_path):
+                                os.remove(answers_path)
+                                logger.info(f"Cleaned up temporary file: {answers_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up temporary files: {e}")
+            else:
+                st.error("Please upload both test file and answer key")
 
 # ───────────────────────────────────────────────
 # MAIN APP WITH NAVIGATION

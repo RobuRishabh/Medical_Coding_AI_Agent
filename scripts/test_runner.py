@@ -9,6 +9,7 @@ from smolagents import CodeAgent
 import streamlit as st
 from typing import Dict
 import re
+import os
 
 class AutomatedTestRunner:
     def __init__(self, agent_config: Dict):
@@ -337,3 +338,110 @@ Format: A. [your reasoning here]"""
     def _score_answer(self, agent_answer: str, correct_answer: str) -> bool:
         """Score individual answer"""
         return agent_answer.strip().upper() == correct_answer.strip().upper()
+    
+    def run_test_with_cached_data(self):
+        """Run test using already extracted and cached data"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Look for existing cached data files
+        cached_data_path = "temp_test_data"
+        
+        if not os.path.exists(cached_data_path):
+            self.logger.error("No cached test data found")
+            raise FileNotFoundError("No cached test data found. Please run the test with PDFs first to generate cached data.")
+        
+        try:
+            # Load cached questions and answers
+            questions_file = os.path.join(cached_data_path, "extracted_questions.json")
+            answers_file = os.path.join(cached_data_path, "extracted_answers.json")
+
+            if not os.path.exists(questions_file) or not os.path.exists(answers_file):
+                self.logger.error("Cached data files not found")
+                raise FileNotFoundError("Cached data files (extracted_questions.json or extracted_answers.json) not found in temp_test_data directory.")
+            
+            # Load the cached data
+            with open(questions_file, 'r', encoding='utf-8') as f:
+                questions = json.load(f)
+            
+            with open(answers_file, 'r', encoding='utf-8') as f:
+                correct_answers = json.load(f)
+            
+            # Validate loaded data
+            if not questions:
+                self.logger.error("No questions found in cached data")
+                raise ValueError("No questions found in cached data")
+            
+            if not correct_answers:
+                self.logger.error("No answers found in cached data")
+                raise ValueError("No answers found in cached data")
+            
+            # Show cached data info
+            st.success(f"✅ Loaded cached data: {len(questions)} questions and {len(correct_answers)} answers")
+            
+            # Ensure questions and answers match in count
+            if len(questions) != len(correct_answers):
+                self.logger.warning(f"Mismatch in cached data: {len(questions)} questions vs {len(correct_answers)} answers")
+                # Use the minimum to avoid index errors
+                min_count = min(len(questions), len(correct_answers))
+                questions = questions[:min_count]
+                correct_answers = correct_answers[:min_count]
+            
+            # Create agent
+            agent = self._create_optimized_agent()
+            if not agent:
+                self.logger.error("Failed to create agent")
+                # Initialize default results before raising exception
+                self.results['test_end_time'] = datetime.now()
+                self.results['score_percentage'] = 0
+                raise Exception("Failed to create AI agent")
+            
+            # Process each question with rate limiting
+            for i, question_data in enumerate(questions):
+                try:
+                    self.logger.info(f"Processing question {i+1}/{len(questions)}")
+                    
+                    # Generate answer and reasoning using agent with retry logic
+                    agent_answer, reasoning = self._get_agent_answer_with_retry(agent, question_data, i+1)
+                    correct_answer = correct_answers[i]
+                    
+                    # Score the answer
+                    is_correct = self._score_answer(agent_answer, correct_answer)
+                    
+                    # Store detailed results
+                    self.results['detailed_results'].append({
+                        'question_number': i + 1,
+                        'question': question_data['question'],
+                        'options': question_data.get('options', []),
+                        'agent_answer': agent_answer,
+                        'correct_answer': correct_answer,
+                        'is_correct': is_correct,
+                        'reasoning': reasoning
+                    })
+                    
+                    if is_correct:
+                        self.results['correct_answers'] += 1
+                        
+                    self.results['questions_answered'] += 1
+                    
+                    # Show progress
+                    progress = (i + 1) / len(questions)
+                    st.progress(progress, f"Processing question {i+1}/{len(questions)}")
+                    
+                    # Add delay between questions to respect rate limits
+                    if i < len(questions) - 1:  # Don't delay after last question
+                        delay = self._calculate_delay(i)
+                        self.logger.info(f"Waiting {delay} seconds before next question...")
+                        time.sleep(delay)
+                
+                except Exception as e:
+                    self.logger.error(f"Error processing question {i+1}: {e}")
+                    # Continue processing other questions
+                    continue
+        
+        except Exception as e:
+            self.logger.error(f"Error in run_test_with_cached_data: {e}")
+            # Ensure we always return a results dictionary, even on error
+            self.results['test_end_time'] = datetime.now()
+            self.results['score_percentage'] = 0
+            # Re-raise the exception after setting default values
+            raise Exception(f"Failed to load cached data: {str(e)}")

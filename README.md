@@ -119,7 +119,7 @@ All documents are processed into a searchable vector database for instant retrie
 ### Optimal Agent Setup
 ```
 agent_config = {
-    'model': 'gemini-2.0-flash',
+    'model': os.getenv("AGENT_MODEL"),
     'tools': ['knowledge_base_retriever', 'web_search'],
     'temperature': 0.2,
     'max_steps': 5,
