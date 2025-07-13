@@ -57,23 +57,18 @@ class TestProcessor:
     def _convert_pdf_to_markdown(self, pdf_path: str) -> str:
         """Convert PDF to markdown text using existing conversion logic"""
         try:
-            # Import the conversion function from the same scripts directory
-            from scripts.ConvertPDF2md import convert_pdf_to_markdown
+            # Use the convert_pdf_to_markdown function from ConvertPDF2md
+            import pdfplumber
             
-            # Create a temporary markdown file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as temp_file:
-                temp_markdown_path = temp_file.name
+            markdown_output = ""
             
-            # Convert PDF to markdown
-            convert_pdf_to_markdown(pdf_path, temp_markdown_path)
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        markdown_output += text + "\n\n"
             
-            # Read the converted markdown
-            markdown_content = Path(temp_markdown_path).read_text(encoding='utf-8')
-            
-            # Clean up temporary file
-            Path(temp_markdown_path).unlink()
-            
-            return markdown_content
+            return markdown_output
             
         except Exception as e:
             self.logger.error(f"Error converting PDF to markdown: {e}")

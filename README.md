@@ -123,7 +123,7 @@ agent_config = {
     'tools': ['knowledge_base_retriever', 'web_search'],
     'temperature': 0.2,
     'max_steps': 5,
-    'timeout': 60
+    'timeout': 3600
 }
 ```
 ### Tool Integration

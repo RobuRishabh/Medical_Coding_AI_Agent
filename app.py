@@ -4,13 +4,13 @@ import json
 import logging
 import re
 from dotenv import load_dotenv
-from smolagents import CodeAgent  # Better choice than ToolCallingAgent
+from smolagents import CodeAgent
 from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool, TOOL_NAMES
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from datetime import datetime
 
 # ───────────────────────────────────────────────
-# STREAMLIT PAGE CONFIG
+# STREAMLIT PAGE CONFIG WITH TIMEOUT SETTINGS
 # ───────────────────────────────────────────────
 st.set_page_config(
     page_title="CPC Medical Coding Assistant",
@@ -18,6 +18,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Configure Streamlit for long-running processes
+import streamlit.web.cli as stcli
+import sys
+
+# Set unlimited timeout for long processes
+os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1000"
+os.environ["STREAMLIT_SERVER_MAX_MESSAGE_SIZE"] = "1000"
+os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
 # ───────────────────────────────────────────────
 # LOGGING SETUP
@@ -172,7 +181,10 @@ def initialize_model():
         raw_llm = ChatOpenAI(
             model=os.getenv("AGENT_MODEL"),
             temperature=0.2,
-            openai_api_key=os.getenv("OPENAI_API_KEY")
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            request_timeout=3600,  # 1 hour timeout
+            max_retries=3,
+            timeout=3600  # Additional timeout parameter
         )
         logger.info("OpenAI model initialized successfully")
         return SafeLLMWrapper(raw_llm)
@@ -235,8 +247,8 @@ def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
         agent = CodeAgent(
             tools=selected_tools,
             model=llm,
-            max_steps=5, 
-            additional_authorized_imports=["re", "json", "os"]  # Add authorized imports
+            max_steps=3, 
+            additional_authorized_imports=["re", "json", "os"]
         )
         
         # Get actual tool names from the selected tools
@@ -421,6 +433,19 @@ def practice_test_interface():
     
     st.header("🎯 Automated Practice Test Runner")
     
+    # Initialize session state for test workflow
+    if 'test_workflow_state' not in st.session_state:
+        st.session_state.test_workflow_state = {
+            'step': 1,
+            'questions_extracted': False,
+            'answers_extracted': False,
+            'extraction_results': None,
+            'test_completed': False
+        }
+    
+    # Step 1: File Upload and Extraction
+    st.subheader("📁 Step 1: Upload Files and Extract Questions/Answers")
+    
     # File upload
     col1, col2 = st.columns(2)
     
@@ -428,35 +453,147 @@ def practice_test_interface():
         test_file = st.file_uploader(
             "Upload Practice Test (PDF)", 
             type=['pdf'],
-            help="Upload the practice test without answers"
+            help="Upload the practice test without answers",
+            key="test_file_upload"
         )
     
     with col2:
         answers_file = st.file_uploader(
             "Upload Answer Key (PDF)", 
             type=['pdf'],
-            help="Upload the practice test with answers"
+            help="Upload the practice test with answers",
+            key="answers_file_upload"
         )
     
-    # Add checkbox to skip extraction
+    # Add checkbox to skip extraction for development
     skip_extraction = st.checkbox("Skip PDF extraction (use cached data)", value=False)
     
-    # Agent configuration
-    st.subheader("🔧 Agent Configuration")
-    col1, col2, col3 = st.columns(3)
+    # Step 1 Button: Extract Questions and Answers
+    extract_button_disabled = not skip_extraction and (not test_file or not answers_file)
     
-    with col1:
-        use_knowledge_base = st.checkbox("Use Knowledge Base", value=True)
-    with col2:
-        use_web_search = st.checkbox("Use Web Search", value=True)
-    with col3:
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
-    
-    # Run test button
-    if st.button("🚀 Run Automated Test", type="primary"):
+    if st.button("🔍 Extract Questions and Answers", 
+                 type="primary", 
+                 disabled=extract_button_disabled,
+                 key="extract_button"):
+        
         if skip_extraction:
-            # Skip file upload requirement and PDF processing
             st.info("Using cached test data...")
+            st.session_state.test_workflow_state['questions_extracted'] = True
+            st.session_state.test_workflow_state['answers_extracted'] = True
+            st.session_state.test_workflow_state['step'] = 2
+            st.success("✅ Using cached data - Ready for automated test!")
+        else:
+            # Save uploaded files
+            test_path = f"temp_test_{datetime.now().timestamp()}.pdf"
+            answers_path = f"temp_answers_{datetime.now().timestamp()}.pdf"
+            
+            with open(test_path, "wb") as f:
+                f.write(test_file.read())
+            with open(answers_path, "wb") as f:
+                f.write(answers_file.read())
+            
+            # Extract questions and answers
+            with st.spinner("🔄 Extracting questions and answers from PDFs..."):
+                try:
+                    # Import and initialize test processor
+                    from scripts.test_processor import TestProcessor
+                    
+                    processor = TestProcessor()
+
+                    # Extract questions and answers using the processor methods
+                    questions_data = processor.extract_questions_from_pdf(test_path)
+                    answers_data = processor.extract_answers_from_pdf(answers_path)
+
+                    # Store extraction results
+                    st.session_state.test_workflow_state['extraction_results'] = {
+                        'questions': questions_data,
+                        'answers': answers_data,
+                        'test_path': test_path,
+                        'answers_path': answers_path
+                    }
+                    
+                    st.session_state.test_workflow_state['questions_extracted'] = True
+                    st.session_state.test_workflow_state['answers_extracted'] = True
+                    st.session_state.test_workflow_state['step'] = 2
+                    
+                    # Display extraction summary
+                    st.success("✅ Extraction completed successfully!")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Questions Extracted", len(questions_data) if questions_data else 0)
+                    with col2:
+                        st.metric("Answers Extracted", len(answers_data) if answers_data else 0)
+                    
+                    # Show a preview of extracted data
+                    if questions_data and len(questions_data) > 0:
+                        with st.expander("📋 Preview Extracted Questions (First 3)"):
+                            for i, question in enumerate(questions_data[:3]):
+                                st.write(f"**Q{i+1}:** {question['question'][:200]}...")
+                                if question.get('options'):
+                                    for option in question['options']:
+                                        st.write(f"  - {option}")
+                    
+                    if answers_data and len(answers_data) > 0:
+                        with st.expander("📝 Preview Extracted Answers (First 3)"):
+                            for i, answer in enumerate(answers_data[:3]):
+                                st.write(f"**A{i+1}:** {answer}")
+                    
+                    # Save extracted data for debugging
+                    processor.save_extracted_data(questions_data, answers_data)
+                    
+                except ImportError as e:
+                    st.error(f"❌ Missing module: {str(e)}")
+                    st.info("Please ensure test_processor.py is available in the scripts directory.")
+                except Exception as e:
+                    st.error(f"❌ Error during extraction: {str(e)}")
+                    st.info("Please check the PDF files and try again.")
+                    # Clean up temporary files on error
+                    try:
+                        if 'test_path' in locals() and os.path.exists(test_path):
+                            os.remove(test_path)
+                        if 'answers_path' in locals() and os.path.exists(answers_path):
+                            os.remove(answers_path)
+                    except:
+                        pass
+    
+    # Show extraction status
+    if st.session_state.test_workflow_state['questions_extracted']:
+        st.success("✅ Questions extracted successfully")
+    if st.session_state.test_workflow_state['answers_extracted']:
+        st.success("✅ Answers extracted successfully")
+    
+    # Step 2: Agent Configuration and Test Execution
+    if st.session_state.test_workflow_state['step'] >= 2:
+        st.markdown("---")
+        st.subheader("⚙️ Step 2: Configure Agent and Run Test")
+        
+        # Agent configuration
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            use_knowledge_base = st.checkbox("Use Knowledge Base", value=True)
+        with col2:
+            use_web_search = st.checkbox("Use Web Search", value=True)
+        with col3:
+            temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
+        
+        # Display agent configuration summary
+        st.info(f"**Agent Configuration:**\n"
+                f"- Model: {os.getenv('AGENT_MODEL', 'gpt-3.5-turbo')}\n"
+                f"- Knowledge Base: {'✅' if use_knowledge_base else '❌'}\n"
+                f"- Web Search: {'✅' if use_web_search else '❌'}\n"
+                f"- Temperature: {temperature}")
+        
+        # Step 2 Button: Run Automated Test
+        test_button_disabled = not (st.session_state.test_workflow_state['questions_extracted'] and 
+                                   st.session_state.test_workflow_state['answers_extracted'])
+        
+        if st.button("🚀 Run Automated Test", 
+                     type="primary", 
+                     use_container_width=True,
+                     disabled=test_button_disabled,
+                     key="run_test_button"):
             
             # Check if base components are ready
             llm, system_prompt = initialize_base_agent()
@@ -464,34 +601,87 @@ def practice_test_interface():
                 st.error("❌ Agent Failed to Initialize")
                 return
             
-            # Run automated test with cached data
-            with st.spinner("Running automated test with cached data..."):
+            # Create a single progress bar and status text outside the test execution
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Run automated test
+            with st.spinner("🔄 Running automated test..."):
                 try:
                     from scripts.test_runner import AutomatedTestRunner
                     
                     agent_config = {
-                        'model': os.getenv("AGENT_MODEL"),
+                        'model': os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
                         'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
-                        'temperature': temperature
+                        'temperature': temperature,
+                        'timeout': 3600
                     }
                     
+                    # Create a callback for progress updates using the single progress bar
+                    def progress_callback(current, total, message):
+                        progress = current / total if total > 0 else 0
+                        progress_bar.progress(progress)
+                        status_text.text(f"Progress: {current}/{total} - {message}")
+                    
                     runner = AutomatedTestRunner(agent_config)
-                    results = runner.run_test_with_cached_data()
+                    
+                    # Use cached data if available, otherwise run full test
+                    if skip_extraction:
+                        results = runner.run_test_with_cached_data(progress_callback=progress_callback)
+                    else:
+                        # Use the extracted data from step 1
+                        extraction_results = st.session_state.test_workflow_state['extraction_results']
+                        results = runner.run_test_with_extracted_data(
+                            extraction_results['questions'],
+                            extraction_results['answers'],
+                            progress_callback=progress_callback
+                        )
+                    
+                    # Clean up temporary files after test completion
+                    if not skip_extraction and st.session_state.test_workflow_state['extraction_results']:
+                        try:
+                            test_path = st.session_state.test_workflow_state['extraction_results']['test_path']
+                            answers_path = st.session_state.test_workflow_state['extraction_results']['answers_path']
+                            if os.path.exists(test_path):
+                                os.remove(test_path)
+                            if os.path.exists(answers_path):
+                                os.remove(answers_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up temporary files: {e}")
                     
                     # Check if results is None
                     if results is None:
                         st.error("❌ Test runner returned no results")
                         return
                     
+                    # Clear the progress bar and status text after completion
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    # Mark test as completed
+                    st.session_state.test_workflow_state['test_completed'] = True
+                    
                     # Display results
-                    st.success(f"Test completed! Score: {results['score_percentage']:.1f}%")
+                    st.success(f"🎉 Test completed! Score: {results['score_percentage']:.1f}%")
+                    
+                    # Display detailed results
+                    st.subheader("📊 Test Results Summary")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Questions", results['questions_answered'])
+                    with col2:
+                        st.metric("Correct Answers", results['correct_answers'])
+                    with col3:
+                        st.metric("Score", f"{results['score_percentage']:.1f}%")
                     
                     # Generate and display report
                     from scripts.results_generator import ResultsGenerator
                     generator = ResultsGenerator(results)
                     report = generator.generate_comprehensive_report()
                     
-                    st.markdown(report)
+                    with st.expander("📋 View Detailed Report"):
+                        st.markdown(report)
                     
                     # Download links
                     st.download_button(
@@ -501,74 +691,62 @@ def practice_test_interface():
                         mime="text/markdown"
                     )
                     
+                    # Show JSON results as well
+                    st.download_button(
+                        "📥 Download Raw Results (JSON)",
+                        data=json.dumps(results, indent=2, default=str),
+                        file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                    
                 except FileNotFoundError as e:
                     st.error(f"❌ Cached data not found: {str(e)}")
                     st.info("Please run the test with PDFs first to generate cached data.")
                 except Exception as e:
                     st.error(f"❌ Error running test: {str(e)}")
                     st.info("Please check the logs for more details.")
+    
+    # Step 3: Results and New Test Option
+    if st.session_state.test_workflow_state.get('test_completed', False):
+        st.markdown("---")
+        st.subheader("🔄 Step 3: Start New Test")
+        
+        if st.button("🆕 Start New Test", key="reset_test"):
+            st.session_state.test_workflow_state = {
+                'step': 1,
+                'questions_extracted': False,
+                'answers_extracted': False,
+                'extraction_results': None,
+                'test_completed': False
+            }
+            st.rerun()
+    
+    # Progress indicator in sidebar
+    st.sidebar.markdown("### 📊 Progress")
+    
+    # Step 1 indicator
+    if st.session_state.test_workflow_state['step'] >= 1:
+        if st.session_state.test_workflow_state['questions_extracted'] and st.session_state.test_workflow_state['answers_extracted']:
+            st.sidebar.success("✅ Step 1: Files Uploaded & Extracted")
         else:
-            # Original logic for processing PDFs
-            if test_file and answers_file:
-                # Check if base components are ready
-                llm, system_prompt = initialize_base_agent()
-                if not llm or not system_prompt:
-                    st.error("❌ Agent Failed to Initialize")
-                    return
-                
-                # Save uploaded files
-                test_path = f"temp_test_{datetime.now().timestamp()}.pdf"
-                answers_path = f"temp_answers_{datetime.now().timestamp()}.pdf"
-                
-                with open(test_path, "wb") as f:
-                    f.write(test_file.read())
-                with open(answers_path, "wb") as f:
-                    f.write(answers_file.read())
-                
-                # Run automated test
-                with st.spinner("Running automated test..."):
-                    from scripts.test_runner import AutomatedTestRunner
-                    
-                    agent_config = {
-                        'model': os.getenv("AGENT_MODEL"),  # Changed from gemini-2.0-flash to OpenAI model
-                        'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
-                        'temperature': temperature
-                    }
-                    
-                    try:
-                        runner = AutomatedTestRunner(agent_config)
-                        results = runner.run_complete_test(test_path, answers_path)
-                        
-                        # Display results
-                        st.success(f"Test completed! Score: {results['score_percentage']:.1f}%")
-                        
-                        # Generate and display report
-                        from scripts.results_generator import ResultsGenerator
-                        generator = ResultsGenerator(results)
-                        report = generator.generate_comprehensive_report()
-                        
-                        st.markdown(report)
-                        
-                        # Download links
-                        st.download_button(
-                            "📥 Download Full Report",
-                            data=report,
-                            file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                            mime="text/markdown"
-                        )
-                    finally:
-                        # Clean up temporary files
-                        try:
-                            if os.path.exists(test_path):
-                                os.remove(test_path)
-                                logger.info(f"Cleaned up temporary file: {test_path}")
-                            if os.path.exists(answers_path):
-                                os.remove(answers_path)
-                                logger.info(f"Cleaned up temporary file: {answers_path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to clean up temporary files: {e}")
-            else:
-                st.error("Please upload both test file and answer key")
+            st.sidebar.info("⏳ Step 1: Upload Files & Extract")
+    else:
+        st.sidebar.info("⏳ Step 1: Upload Files & Extract")
+    
+    # Step 2 indicator
+    if st.session_state.test_workflow_state['step'] >= 2:
+        if st.session_state.test_workflow_state.get('test_completed', False):
+            st.sidebar.success("✅ Step 2: Test Completed")
+        else:
+            st.sidebar.info("⏳ Step 2: Configure & Run Test")
+    else:
+        st.sidebar.info("⏳ Step 2: Configure & Run Test")
+    
+    # Step 3 indicator
+    if st.session_state.test_workflow_state.get('test_completed', False):
+        st.sidebar.success("✅ Step 3: Ready for New Test")
+    else:
+        st.sidebar.info("⏳ Step 3: New Test Option")
 
 # ───────────────────────────────────────────────
 # MAIN APP WITH NAVIGATION

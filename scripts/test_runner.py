@@ -7,7 +7,7 @@ import sys
 from scripts.test_processor import TestProcessor
 from smolagents import CodeAgent
 import streamlit as st
-from typing import Dict
+from typing import Dict, List
 import re
 import os
 
@@ -229,10 +229,19 @@ Format: A. [your reasoning here]"""
             self.logger.error("Failed to create agent")
             raise Exception("Failed to create AI agent")
         
+        # Create a single progress bar outside the loop
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         # Process each question with rate limiting
         for i, question_data in enumerate(questions):
             try:
                 self.logger.info(f"Processing question {i+1}/{len(questions)}")
+                
+                # Update progress bar and status text
+                progress = (i + 1) / len(questions)
+                progress_bar.progress(progress)
+                status_text.text(f"Processing question {i+1}/{len(questions)}")
                 
                 # Generate answer and reasoning using agent with retry logic
                 agent_answer, reasoning = self._get_agent_answer_with_retry(agent, question_data, i+1)
@@ -257,10 +266,6 @@ Format: A. [your reasoning here]"""
                     
                 self.results['questions_answered'] += 1
                 
-                # Show progress
-                progress = (i + 1) / len(questions)
-                st.progress(progress, f"Processing question {i+1}/{len(questions)}")
-                
                 # Add delay between questions to respect rate limits
                 if i < len(questions) - 1:  # Don't delay after last question
                     delay = self._calculate_delay(i)
@@ -270,6 +275,9 @@ Format: A. [your reasoning here]"""
             except Exception as e:
                 self.logger.error(f"Error processing question {i+1}: {e}")
                 continue
+        
+        # Clear the status text when done
+        status_text.text("Processing complete!")
         
         # Calculate final score
         if self.results['questions_answered'] > 0:
@@ -339,7 +347,101 @@ Format: A. [your reasoning here]"""
         """Score individual answer"""
         return agent_answer.strip().upper() == correct_answer.strip().upper()
     
-    def run_test_with_cached_data(self):
+    def run_test_with_extracted_data(self, questions: List[Dict], answers: List[str], progress_callback=None):
+        """Run test using pre-extracted questions and answers"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Validate input data
+        if not questions:
+            self.logger.error("No questions provided")
+            raise ValueError("No questions provided")
+        
+        if not answers:
+            self.logger.error("No answers provided")
+            raise ValueError("No answers provided")
+        
+        # Show extracted data info
+        st.success(f"✅ Using extracted data: {len(questions)} questions and {len(answers)} answers")
+        
+        # Ensure questions and answers match in count
+        if len(questions) != len(answers):
+            self.logger.warning(f"Mismatch in extracted data: {len(questions)} questions vs {len(answers)} answers")
+            # Use the minimum to avoid index errors
+            min_count = min(len(questions), len(answers))
+            questions = questions[:min_count]
+            answers = answers[:min_count]
+        
+        # Create agent
+        agent = self._create_optimized_agent()
+        if not agent:
+            self.logger.error("Failed to create agent")
+            # Initialize default results before raising exception
+            self.results['test_end_time'] = datetime.now()
+            self.results['score_percentage'] = 0
+            raise Exception("Failed to create AI agent")
+        
+        # Initial progress update
+        if progress_callback:
+            progress_callback(0, len(questions), "Starting test...")
+        
+        # Process each question with rate limiting
+        for i, question_data in enumerate(questions):
+            try:
+                self.logger.info(f"Processing question {i+1}/{len(questions)}")
+                
+                # Update progress - use callback if provided
+                if progress_callback:
+                    progress_callback(i, len(questions), f"Processing question {i+1}")
+                
+                # Generate answer and reasoning using agent with retry logic
+                agent_answer, reasoning = self._get_agent_answer_with_retry(agent, question_data, i+1)
+                correct_answer = answers[i]
+                
+                # Score the answer
+                is_correct = self._score_answer(agent_answer, correct_answer)
+                
+                # Store detailed results
+                self.results['detailed_results'].append({
+                    'question_number': i + 1,
+                    'question': question_data['question'],
+                    'options': question_data.get('options', []),
+                    'agent_answer': agent_answer,
+                    'correct_answer': correct_answer,
+                    'is_correct': is_correct,
+                    'reasoning': reasoning
+                })
+                
+                if is_correct:
+                    self.results['correct_answers'] += 1
+                    
+                self.results['questions_answered'] += 1
+                
+                # Add delay between questions to respect rate limits
+                if i < len(questions) - 1:  # Don't delay after last question
+                    delay = self._calculate_delay(i)
+                    self.logger.info(f"Waiting {delay} seconds before next question...")
+                    time.sleep(delay)
+    
+            except Exception as e:
+                self.logger.error(f"Error processing question {i+1}: {e}")
+                # Continue processing other questions
+                continue
+    
+        # Final progress update
+        if progress_callback:
+            progress_callback(len(questions), len(questions), "Test completed!")
+    
+        # Calculate final score
+        if self.results['questions_answered'] > 0:
+            self.results['score_percentage'] = (
+                self.results['correct_answers'] / self.results['questions_answered'] * 100
+            )
+        
+        self.results['test_end_time'] = datetime.now()
+        
+        return self.results
+
+    def run_test_with_cached_data(self, progress_callback=None):
         """Run test using already extracted and cached data"""
         self.results['test_start_time'] = datetime.now()
         
@@ -347,101 +449,20 @@ Format: A. [your reasoning here]"""
         cached_data_path = "temp_test_data"
         
         if not os.path.exists(cached_data_path):
-            self.logger.error("No cached test data found")
-            raise FileNotFoundError("No cached test data found. Please run the test with PDFs first to generate cached data.")
+            self.logger.error("No cached data found")
+            raise FileNotFoundError("No cached test data found. Please run extraction first.")
         
         try:
             # Load cached questions and answers
-            questions_file = os.path.join(cached_data_path, "extracted_questions.json")
-            answers_file = os.path.join(cached_data_path, "extracted_answers.json")
-
-            if not os.path.exists(questions_file) or not os.path.exists(answers_file):
-                self.logger.error("Cached data files not found")
-                raise FileNotFoundError("Cached data files (extracted_questions.json or extracted_answers.json) not found in temp_test_data directory.")
-            
-            # Load the cached data
-            with open(questions_file, 'r', encoding='utf-8') as f:
+            with open(os.path.join(cached_data_path, "extracted_questions.json"), 'r') as f:
                 questions = json.load(f)
-            
-            with open(answers_file, 'r', encoding='utf-8') as f:
-                correct_answers = json.load(f)
-            
-            # Validate loaded data
-            if not questions:
-                self.logger.error("No questions found in cached data")
-                raise ValueError("No questions found in cached data")
-            
-            if not correct_answers:
-                self.logger.error("No answers found in cached data")
-                raise ValueError("No answers found in cached data")
-            
-            # Show cached data info
-            st.success(f"✅ Loaded cached data: {len(questions)} questions and {len(correct_answers)} answers")
-            
-            # Ensure questions and answers match in count
-            if len(questions) != len(correct_answers):
-                self.logger.warning(f"Mismatch in cached data: {len(questions)} questions vs {len(correct_answers)} answers")
-                # Use the minimum to avoid index errors
-                min_count = min(len(questions), len(correct_answers))
-                questions = questions[:min_count]
-                correct_answers = correct_answers[:min_count]
-            
-            # Create agent
-            agent = self._create_optimized_agent()
-            if not agent:
-                self.logger.error("Failed to create agent")
-                # Initialize default results before raising exception
-                self.results['test_end_time'] = datetime.now()
-                self.results['score_percentage'] = 0
-                raise Exception("Failed to create AI agent")
-            
-            # Process each question with rate limiting
-            for i, question_data in enumerate(questions):
-                try:
-                    self.logger.info(f"Processing question {i+1}/{len(questions)}")
-                    
-                    # Generate answer and reasoning using agent with retry logic
-                    agent_answer, reasoning = self._get_agent_answer_with_retry(agent, question_data, i+1)
-                    correct_answer = correct_answers[i]
-                    
-                    # Score the answer
-                    is_correct = self._score_answer(agent_answer, correct_answer)
-                    
-                    # Store detailed results
-                    self.results['detailed_results'].append({
-                        'question_number': i + 1,
-                        'question': question_data['question'],
-                        'options': question_data.get('options', []),
-                        'agent_answer': agent_answer,
-                        'correct_answer': correct_answer,
-                        'is_correct': is_correct,
-                        'reasoning': reasoning
-                    })
-                    
-                    if is_correct:
-                        self.results['correct_answers'] += 1
-                        
-                    self.results['questions_answered'] += 1
-                    
-                    # Show progress
-                    progress = (i + 1) / len(questions)
-                    st.progress(progress, f"Processing question {i+1}/{len(questions)}")
-                    
-                    # Add delay between questions to respect rate limits
-                    if i < len(questions) - 1:  # Don't delay after last question
-                        delay = self._calculate_delay(i)
-                        self.logger.info(f"Waiting {delay} seconds before next question...")
-                        time.sleep(delay)
                 
-                except Exception as e:
-                    self.logger.error(f"Error processing question {i+1}: {e}")
-                    # Continue processing other questions
-                    continue
-        
+            with open(os.path.join(cached_data_path, "extracted_answers.json"), 'r') as f:
+                answers = json.load(f)
+                
+            # Use the extracted data method
+            return self.run_test_with_extracted_data(questions, answers, progress_callback)
+            
         except Exception as e:
-            self.logger.error(f"Error in run_test_with_cached_data: {e}")
-            # Ensure we always return a results dictionary, even on error
-            self.results['test_end_time'] = datetime.now()
-            self.results['score_percentage'] = 0
-            # Re-raise the exception after setting default values
-            raise Exception(f"Failed to load cached data: {str(e)}")
+            self.logger.error(f"Error loading cached data: {e}")
+            raise Exception(f"Failed to load cached test data: {e}")
