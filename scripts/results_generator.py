@@ -49,10 +49,10 @@ class ResultsGenerator:
     
     def save_results(self, output_path: str):
         """Save results to file"""
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(self.generate_comprehensive_report())
         
         # Also save raw JSON data
         json_path = output_path.replace('.md', '.json')
-        with open(json_path, 'w') as f:
-            json.dump(self.results, f, indent=2, default=str)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(self.results, f, indent=2, default=str, ensure_ascii=False)

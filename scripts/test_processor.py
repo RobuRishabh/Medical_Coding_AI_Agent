@@ -135,19 +135,58 @@ class TestProcessor:
         return questions
     
     def _parse_answers_from_markdown(self, markdown_text: str) -> List[str]:
-        """Parse answers from markdown text"""
+        """Parse answers from markdown text - improved version"""
         answers = []
         
         # Split text into lines for processing
         lines = markdown_text.split('\n')
         
-        # Pattern to match answer key format
+        # Method 1: Look for "Correct Answer" pattern (for options 2 & 3)
+        answer_dict = {}
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # Look for "Correct Answer" pattern
+            if line.startswith("**Correct Answer**:"):
+                # Extract the answer letter
+                answer_match = re.search(r'\*\*Correct Answer\*\*:\s*([A-D])', line)
+                if answer_match:
+                    answer_letter = answer_match.group(1)
+                    
+                    # Find the corresponding question number by looking backwards
+                    question_num = None
+                    for j in range(i-1, max(0, i-20), -1):  # Look back up to 20 lines
+                        prev_line = lines[j].strip()
+                        question_match = re.search(r'### Question (\d+)', prev_line)
+                        if question_match:
+                            question_num = int(question_match.group(1))
+                            break
+                    
+                    if question_num:
+                        answer_dict[question_num] = answer_letter
+        
+        # If we found answers using the "Correct Answer" pattern, use those
+        if answer_dict:
+            # Convert dict to ordered list
+            max_question = max(answer_dict.keys()) if answer_dict else 0
+            for i in range(1, max_question + 1):
+                if i in answer_dict:
+                    answers.append(answer_dict[i])
+                else:
+                    self.logger.warning(f"Missing answer for question {i}")
+                    answers.append("A")  # Default fallback
+            
+            self.logger.info(f"Extracted {len(answers)} answers using 'Correct Answer' pattern")
+            return answers
+        
+        # Method 2: Look for simple answer key pattern (for option 1)
         answer_patterns = [
-            r'^(\d+)\.\s*([A-D])',  # Format: "1. A"
-            r'^(\d+)\)\s*([A-D])',  # Format: "1) A"
-            r'^Question\s*(\d+):\s*([A-D])',  # Format: "Question 1: A"
-            r'^(\d+)\s*-\s*([A-D])',  # Format: "1 - A"
-            r'^(\d+)\s+([A-D])',  # Format: "1 A"
+            r'^(\d+)\.\s*([A-D])',            # 1. A
+            r'^(\d+)\)\s*([A-D])',            # 1) A
+            r'^Question\s*(\d+):\s*([A-D])',  # Question 1: A
+            r'^(\d+)\s*-\s*([A-D])',          # 1 - A
+            r'^(\d+)\s+([A-D])',              # 1 A
         ]
         
         answer_dict = {}
@@ -156,66 +195,103 @@ class TestProcessor:
             line = line.strip()
             if not line:
                 continue
-            
-            # Try each pattern
+                
             for pattern in answer_patterns:
-                match = re.match(pattern, line, re.IGNORECASE)
+                match = re.search(pattern, line)
                 if match:
                     question_num = int(match.group(1))
-                    answer_letter = match.group(2).upper()
+                    answer_letter = match.group(2)
                     answer_dict[question_num] = answer_letter
                     break
         
         # Convert dict to ordered list
         if answer_dict:
-            max_question = max(answer_dict.keys())
+            max_question = max(answer_dict.keys()) if answer_dict else 0
             for i in range(1, max_question + 1):
-                answers.append(answer_dict.get(i, 'A'))  # Default to A if missing
+                if i in answer_dict:
+                    answers.append(answer_dict[i])
+                else:
+                    self.logger.warning(f"Missing answer for question {i}")
+                    answers.append("A")  # Default fallback
+            
+            self.logger.info(f"Extracted {len(answers)} answers using simple pattern")
+            return answers
         
-        # If no structured answers found, try to extract from text patterns
+        # Method 3: Fallback - look for any A, B, C, D pattern (last resort)
         if not answers:
-            # Look for answer key sections
-            answer_key_section = ""
-            capture_answers = False
+            self.logger.warning("No structured answers found, trying fallback method")
             
+            # Look for isolated A, B, C, D answers
             for line in lines:
-                if re.search(r'answer\s*key|answers|solution', line, re.IGNORECASE):
-                    capture_answers = True
-                    continue
-                
-                if capture_answers:
-                    answer_key_section += line + " "
+                line = line.strip()
+                if re.match(r'^[A-D]$', line):
+                    answers.append(line)
             
-            # Extract letters from answer key section
-            if answer_key_section:
-                letter_matches = re.findall(r'\b([A-D])\b', answer_key_section)
-                if len(letter_matches) > 5:  # Reasonable number of answers
-                    answers = letter_matches[:100]  # Limit to reasonable number
-        
+            # Limit to reasonable number (avoid parsing MCQ options as answers)
+            if len(answers) > 200:  # If we get too many, it's likely wrong
+                answers = answers[:100]  # Take first 100
+    
+        self.logger.info(f"Final extracted answers count: {len(answers)}")
         return answers
     
     def save_extracted_data(self, questions: List[Dict], answers: List[str], output_dir: str = "temp_test_data"):
-        """Save extracted questions and answers for debugging"""
+        """Save extracted questions and answers for debugging - improved version"""
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
         
         # Save questions
-        with open(output_path / "extracted_questions.json", 'w') as f:
-            json.dump(questions, f, indent=2)
-        
+        with open(output_path / "extracted_questions.json", 'w', encoding='utf-8') as f:
+            json.dump(questions, f, indent=2, ensure_ascii=False)
+    
         # Save answers
-        with open(output_path / "extracted_answers.json", 'w') as f:
-            json.dump(answers, f, indent=2)
-        
-        # Save formatted view
-        with open(output_path / "formatted_test.md", 'w') as f:
+        with open(output_path / "extracted_answers.json", 'w', encoding='utf-8') as f:
+            json.dump(answers, f, indent=2, ensure_ascii=False)
+    
+        # Save formatted view with validation
+        with open(output_path / "formatted_test.md", 'w', encoding='utf-8') as f:
             f.write("# Extracted Test Data\n\n")
             f.write("## Questions\n\n")
-            for i, q in enumerate(questions):
-                f.write(f"### Question {q['question_number']}\n")
-                f.write(f"{q['question']}\n\n")
-                for option in q['options']:
-                    f.write(f"- {option}\n")
-                f.write(f"\n**Correct Answer**: {answers[i] if i < len(answers) else 'N/A'}\n\n")
-        
+            
+            for i, question in enumerate(questions):
+                f.write(f"### Question {i+1}\n")
+                f.write(f"{question['question']}\n\n")
+                
+                if question.get('options'):
+                    for option in question['options']:
+                        f.write(f"- {option}\n")
+                
+                # Add correct answer if available
+                if i < len(answers):
+                    f.write(f"\n**Correct Answer**: {answers[i]}\n\n")
+                else:
+                    f.write(f"\n**Correct Answer**: NOT FOUND\n\n")
+    
+        # Add validation summary
+        with open(output_path / "validation_summary.txt", 'w', encoding='utf-8') as f:
+            f.write(f"Extraction Validation Summary\n")
+            f.write(f"============================\n\n")
+            f.write(f"Questions extracted: {len(questions)}\n")
+            f.write(f"Answers extracted: {len(answers)}\n")
+            f.write(f"Match status: {'MATCH' if len(questions) == len(answers) else 'MISMATCH'}\n\n")
+            
+            if len(questions) != len(answers):
+                f.write("WARNING: Question and answer counts don't match!\n")
+                f.write("This will cause issues during test execution.\n\n")
+            
+            # Show answer distribution
+            if answers:
+                from collections import Counter
+                answer_counts = Counter(answers)
+                f.write("Answer Distribution:\n")
+                for letter in ['A', 'B', 'C', 'D']:
+                    count = answer_counts.get(letter, 0)
+                    percentage = (count / len(answers)) * 100 if answers else 0
+                    f.write(f"  {letter}: {count} ({percentage:.1f}%)\n")
+
         self.logger.info(f"Extracted data saved to {output_path}")
+        
+        # Log validation results
+        if len(questions) == len(answers):
+            self.logger.info("Questions and answers count match")
+        else:
+            self.logger.error(f"Mismatch: {len(questions)} questions vs {len(answers)} answers")

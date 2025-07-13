@@ -686,15 +686,16 @@ def practice_test_interface():
                     # Download links
                     st.download_button(
                         "📥 Download Full Report",
-                        data=report,
+                        data=report.encode('utf-8'),
                         file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
                         mime="text/markdown"
                     )
                     
                     # Show JSON results as well
+                    json_data = json.dumps(results, indent=2, default=str, ensure_ascii=False)
                     st.download_button(
                         "📥 Download Raw Results (JSON)",
-                        data=json.dumps(results, indent=2, default=str),
+                        data=json_data.encode('utf-8'),
                         file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json"
                     )

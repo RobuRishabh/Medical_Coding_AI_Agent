@@ -40,7 +40,9 @@ def convert_pdf_to_markdown(pdf_path: str, output_path: str):
     
     if markdown_output.strip():
         try:
-            Path(output_path).write_text(markdown_output, encoding="utf-8")
+            # Ensure UTF-8 encoding when writing the file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_output)
             logger.info(f"Successfully converted {pdf_path} to {output_path}")
             logger.info(f"Total characters written: {len(markdown_output)}")
         except Exception as e:
