@@ -173,5 +173,7 @@ class WebSearchTool(Tool):
 logger.info("Initializing tools...")
 knowledge_base_retriever = KnowledgeBaseRetriever()
 web_search_tool = WebSearchTool()
+# Export tool names for the prompt template
+TOOL_NAMES = [knowledge_base_retriever.name, web_search_tool.name]
 
 logger.info("smolagent_tools initialization completed")

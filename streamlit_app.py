@@ -2,9 +2,10 @@ import streamlit as st
 import os
 import json
 import logging
+import re
 from dotenv import load_dotenv
-from smolagents import ToolCallingAgent  # Better choice than CodeAgent
-from smolagent_tools import knowledge_base_retriever, web_search_tool
+from smolagents import CodeAgent  # Better choice than ToolCallingAgent
+from smolagent_tools import knowledge_base_retriever, web_search_tool, TOOL_NAMES
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 # ───────────────────────────────────────────────
@@ -88,6 +89,32 @@ class SafeLLMWrapper:
             converted_messages = self.convert_messages(messages)
             response = self.llm.invoke(converted_messages, **kwargs)
             
+            # Post-process response to fix code block formatting
+            content = getattr(response, "content", str(response))
+            
+            # Convert markdown code blocks to <code> tags expected by CodeAgent
+            # Replace ```python or ```tool_code blocks with <code> tags
+            content = re.sub(r'```(?:python|tool_code)?\s*\n(.*?)\n```', r'<code>\1</code>', content, flags=re.DOTALL)
+            
+            # Also handle single backtick code blocks
+            content = re.sub(r'`([^`]+)`', r'<code>\1</code>', content)
+            
+            # Create a modified response object
+            class ModifiedResponse:
+                def __init__(self, original_response, modified_content):
+                    self.content = modified_content
+                    # Copy other attributes from original response safely
+                    for attr in dir(original_response):
+                        if not attr.startswith('_') and attr != 'content':
+                            try:
+                                # Skip problematic Pydantic attributes
+                                if attr not in ['model_computed_fields', 'model_fields', 'model_config']:
+                                    setattr(self, attr, getattr(original_response, attr))
+                            except:
+                                pass
+            
+            modified_response = ModifiedResponse(response, content)
+            
             class Result:
                 def __init__(self, content, response_obj):
                     self.content = content
@@ -109,7 +136,7 @@ class SafeLLMWrapper:
                                 self.total_tokens = 0
                         self.token_usage = TokenUsage()
             
-            return Result(content=getattr(response, "content", str(response)), response_obj=response)
+            return Result(content=content, response_obj=modified_response)
         except Exception as e:
             logger.error(f"LLM.generate failed: {e}")
             raise
@@ -149,6 +176,17 @@ def initialize_base_agent():
     try:
         logger.info("Creating base agent components...")
         system_prompt = load_system_prompt()
+        
+        # Debug: Check available tools
+        logger.info(f"knowledge_base_retriever: {knowledge_base_retriever}")
+        logger.info(f"web_search_tool: {web_search_tool}")
+        
+        # Log tool names if they have a name attribute
+        if hasattr(knowledge_base_retriever, 'name'):
+            logger.info(f"Knowledge base tool name: {knowledge_base_retriever.name}")
+        if hasattr(web_search_tool, 'name'):
+            logger.info(f"Web search tool name: {web_search_tool.name}")
+        
         logger.info("Base agent components created successfully")
         return llm, system_prompt
     except Exception as e:
@@ -169,16 +207,28 @@ def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
             selected_tools.append(web_search_tool)
         if use_knowledge_base:
             selected_tools.append(knowledge_base_retriever)
+
+        logger.info(f"Creating CodeAgent with {len(selected_tools)} tools...")
         
-        logger.info(f"Creating ToolCallingAgent with {len(selected_tools)} tools...")
-        agent = ToolCallingAgent(
+        # Log the actual tool names for debugging
+        for tool in selected_tools:
+            tool_name = getattr(tool, 'name', str(tool))
+            logger.info(f"Available tool: {tool_name}")
+        
+        agent = CodeAgent(
             tools=selected_tools,
             model=llm,
-            max_steps=3
+            max_steps=5, 
+            additional_authorized_imports=["re", "json", "os"]  # Add authorized imports
         )
         
-        # Enhanced system prompt with citation requirements
-        enhanced_system_prompt = system_prompt
+        # Get actual tool names from the selected tools
+        tool_names = [tool.name for tool in selected_tools]
+        
+        logger.info(f"Actual tool names: {tool_names}")
+        
+        # Enhanced system prompt with correct tool names
+        enhanced_system_prompt = system_prompt.format(tool_names=tool_names)
         
         # Set enhanced system prompt
         agent.prompt_templates["system_prompt"] = enhanced_system_prompt
@@ -203,7 +253,6 @@ def extract_citations_from_response(response_text, agent):
         sources_section = response_text.split("**Sources:**")[1] if "**Sources:**" in response_text else ""
         
         # Extract web sources
-        import re
         web_pattern = r'- Web Search: \[([^\]]+)\]\(([^)]+)\)(.*)'
         web_matches = re.findall(web_pattern, sources_section)
         for match in web_matches:
