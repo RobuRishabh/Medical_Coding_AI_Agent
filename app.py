@@ -539,6 +539,42 @@ def practice_test_interface():
                             for i, answer in enumerate(answers_data[:3]):
                                 st.write(f"**A{i+1}:** {answer}")
                     
+                    # Show validation summary
+                    if questions_data and answers_data:
+                        st.subheader("🔍 Extraction Validation")
+                        
+                        # Check if counts match
+                        if len(questions_data) == len(answers_data):
+                            st.success(f"✅ Perfect match: {len(questions_data)} questions and {len(answers_data)} answers")
+                        else:
+                            st.error(f"❌ Mismatch: {len(questions_data)} questions vs {len(answers_data)} answers")
+                            st.warning("This mismatch will cause accuracy issues during testing!")
+                        
+                        # Show answer distribution
+                        if answers_data:
+                            from collections import Counter
+                            answer_counts = Counter(answers_data)
+                            
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("A answers", answer_counts.get('A', 0))
+                            with col2:
+                                st.metric("B answers", answer_counts.get('B', 0))
+                            with col3:
+                                st.metric("C answers", answer_counts.get('C', 0))
+                            with col4:
+                                st.metric("D answers", answer_counts.get('D', 0))
+                            
+                            # Check for distribution issues
+                            total_answers = len(answers_data)
+                            max_count = max(answer_counts.values()) if answer_counts else 0
+                            max_percentage = (max_count / total_answers * 100) if total_answers > 0 else 0
+                            
+                            if max_percentage > 60:
+                                st.warning(f"⚠️ One answer dominates ({max_percentage:.1f}%) - may indicate extraction error")
+                            else:
+                                st.success("✅ Answer distribution appears reasonable")
+                    
                     # Save extracted data for debugging
                     processor.save_extracted_data(questions_data, answers_data)
                     

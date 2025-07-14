@@ -305,7 +305,10 @@ Format: A. [your reasoning here]"""
     
     def _format_question_for_agent(self, question_data: Dict) -> str:
         """Format question in optimal way for agent"""
-        formatted = f"Medical Coding Question {question_data['question_number']}:\n\n"
+        # Get question number safely
+        question_number = question_data.get('question_number', 1)
+        
+        formatted = f"Medical Coding Question {question_number}:\n\n"
         formatted += f"{question_data['question']}\n\n"
         
         if question_data.get('options'):
@@ -360,6 +363,11 @@ Format: A. [your reasoning here]"""
             self.logger.error("No answers provided")
             raise ValueError("No answers provided")
         
+        # Ensure all questions have question_number field
+        for i, question in enumerate(questions):
+            if 'question_number' not in question:
+                question['question_number'] = i + 1
+        
         # Show extracted data info
         st.success(f"✅ Using extracted data: {len(questions)} questions and {len(answers)} answers")
         
@@ -402,7 +410,7 @@ Format: A. [your reasoning here]"""
                 
                 # Store detailed results
                 self.results['detailed_results'].append({
-                    'question_number': i + 1,
+                    'question_number': question_data.get('question_number', i + 1),
                     'question': question_data['question'],
                     'options': question_data.get('options', []),
                     'agent_answer': agent_answer,
@@ -421,16 +429,16 @@ Format: A. [your reasoning here]"""
                     delay = self._calculate_delay(i)
                     self.logger.info(f"Waiting {delay} seconds before next question...")
                     time.sleep(delay)
-    
+
             except Exception as e:
                 self.logger.error(f"Error processing question {i+1}: {e}")
                 # Continue processing other questions
                 continue
-    
+
         # Final progress update
         if progress_callback:
             progress_callback(len(questions), len(questions), "Test completed!")
-    
+
         # Calculate final score
         if self.results['questions_answered'] > 0:
             self.results['score_percentage'] = (
