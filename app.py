@@ -8,6 +8,7 @@ from smolagents import CodeAgent
 from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool, TOOL_NAMES
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from datetime import datetime
+import litellm
 
 # ───────────────────────────────────────────────
 # STREAMLIT PAGE CONFIG WITH TIMEOUT SETTINGS
@@ -57,14 +58,144 @@ def load_system_prompt(path="prompts.json") -> str:
         return "You are a medical coding assistant."
 
 # ───────────────────────────────────────────────
-# Safe wrapper for ChatGoogleGenerativeAI output
+# OPTIMIZED AGENT CREATION WITH CACHING
 # ───────────────────────────────────────────────
-class SafeLLMWrapper:
-    def __init__(self, llm):
-        self.llm = llm
+@st.cache_resource
+def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = True):
+    """Create a faster, more efficient agent with caching"""
+    logger.info("Creating optimized fast agent...")
+    
+    try:
+        # Use LiteLLM wrapper for faster responses
+        llm_wrapper = LiteLLMWrapper(
+            model_name=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+        
+        # Optimize tool selection - use cached tool instances
+        selected_tools = []
+        if use_web_search:
+            selected_tools.append(web_search_tool)  # Use cached instance
+        if use_knowledge_base:
+            selected_tools.append(knowledge_base_retriever)  # Use cached instance
+        
+        logger.info(f"Creating agent with {len(selected_tools)} tools")
+        
+        # Create agent with performance optimizations
+        agent = CodeAgent(
+            tools=selected_tools,
+            model=llm_wrapper,
+            max_steps=1,  # Keep this low for speed
+            additional_authorized_imports=["re", "json", "os"]
+            # Removed verbose parameter as it's not supported
+        )
+        
+        # Load and set optimized system prompt
+        system_prompt = load_system_prompt()
+        tool_names = [tool.name for tool in selected_tools]
+        enhanced_system_prompt = system_prompt.format(tool_names=tool_names)
+        
+        # Set the system prompt
+        agent.prompt_templates["system_prompt"] = enhanced_system_prompt
+        
+        logger.info("Fast agent created successfully")
+        return agent
+        
+    except Exception as e:
+        logger.error(f"Failed to create fast agent: {e}")
+        st.error(f"Failed to create fast agent: {e}")
+        return None
+
+@st.cache_resource
+def create_test_optimized_agent():
+    """Create agent specifically optimized for test taking"""
+    logger.info("Creating test-optimized agent...")
+    
+    try:
+        # Use faster model settings for test taking
+        llm_wrapper = LiteLLMWrapper(
+            model_name=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+        
+        # For tests, we want both tools for maximum accuracy
+        selected_tools = [knowledge_base_retriever, web_search_tool]
+        
+        # Create agent with test-specific optimizations
+        agent = CodeAgent(
+            tools=selected_tools,
+            model=llm_wrapper,
+            max_steps=1,  # Single step for faster responses
+            additional_authorized_imports=["re", "json", "os"]
+            # Removed verbose parameter as it's not supported
+        )
+        
+        # Load test-specific system prompt
+        try:
+            with open("prompts.json", "r", encoding="utf-8") as file:
+                prompts = json.load(file)
+            test_prompt = prompts.get("PRACTICE_TEST_PROMPT", "")
+            if test_prompt:
+                agent.prompt_templates["system_prompt"] = test_prompt
+        except Exception as e:
+            logger.warning(f"Could not load test prompt: {e}")
+        
+        logger.info("Test-optimized agent created successfully")
+        return agent
+        
+    except Exception as e:
+        logger.error(f"Failed to create test-optimized agent: {e}")
+        return None
+
+# ───────────────────────────────────────────────
+# AGENT POOL FOR PARALLEL PROCESSING
+# ───────────────────────────────────────────────
+@st.cache_resource
+def create_agent_pool(pool_size: int = 3):
+    """Create a pool of agents for parallel processing"""
+    logger.info(f"Creating agent pool with {pool_size} agents...")
+    
+    agent_pool = []
+    for i in range(pool_size):
+        try:
+            agent = create_test_optimized_agent()
+            if agent:
+                agent_pool.append(agent)
+                logger.info(f"Agent {i+1}/{pool_size} created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create agent {i+1}: {e}")
+    
+    logger.info(f"Agent pool created with {len(agent_pool)} agents")
+    return agent_pool
+
+# ───────────────────────────────────────────────
+# OPTIMIZED LITELLM WRAPPER
+# ───────────────────────────────────────────────
+class LiteLLMWrapper:
+    def __init__(self, model_name, api_key=None):
+        self.model_name = model_name
+        if api_key:
+            litellm.api_key = api_key
+        
+        # Aggressive optimizations for speed
+        litellm.request_timeout = 30  # Reduced from 60 seconds
+        litellm.caching = True
+        litellm.max_retries = 1  # Reduced retries for speed
+        
+        # Set model-specific optimizations
+        if "gpt-3.5" in model_name:
+            self.default_max_tokens = 800
+        elif "gpt-4" in model_name:
+            self.default_max_tokens = 1000
+        elif "nano" in model_name.lower():  # For your gpt-4.1-nano model
+            self.default_max_tokens = 600  # Smaller for nano model
+        else:
+            self.default_max_tokens = 600
+        
+        logger.info(f"LiteLLM optimized for speed with model: {model_name}")
 
     def convert_messages(self, messages):
-        # Handle single message case
+        """Convert messages to LiteLLM format (optimized version)"""
         if not isinstance(messages, list):
             messages = [messages]
             
@@ -74,86 +205,71 @@ class SafeLLMWrapper:
             content = getattr(msg, "content", None)
 
             if role == "user":
-                converted.append(HumanMessage(content=content))
+                converted.append({"role": "user", "content": content})
             elif role == "assistant":
-                converted.append(AIMessage(content=content))
+                converted.append({"role": "assistant", "content": content})
             elif role == "system":
-                converted.append(SystemMessage(content=content))
+                converted.append({"role": "system", "content": content})
             elif hasattr(role, 'value') and role.value == 'tool-response':
+                # Handle tool responses more efficiently
                 if isinstance(content, list) and len(content) > 0:
                     text_content = content[0].get('text', str(content))
                 else:
                     text_content = str(content)
-                converted.append(HumanMessage(content=text_content))
+                converted.append({"role": "user", "content": text_content})
             else:
-                logger.warning(f"Unsupported role: {role}, converting to HumanMessage")
+                # Fallback conversion
                 if isinstance(content, list) and len(content) > 0:
                     text_content = content[0].get('text', str(content))
                 else:
                     text_content = str(content)
-                converted.append(HumanMessage(content=text_content))
+                converted.append({"role": "user", "content": text_content})
+        
         return converted
 
     def generate(self, messages, **kwargs):
         try:
-            # Filter out Gemini-specific arguments that OpenAI doesn't support
-            filtered_kwargs = {}
-            openai_supported_args = {
-                'temperature', 'max_tokens', 'top_p', 'frequency_penalty', 
-                'presence_penalty', 'stop', 'stream', 'logit_bias', 'user'
+            # Convert messages to LiteLLM format
+            litellm_messages = self.convert_messages(messages)
+            
+            # Optimized parameters for speed (especially for nano model)
+            litellm_kwargs = {
+                'model': self.model_name,
+                'messages': litellm_messages,
+                'temperature': kwargs.get('temperature', 0.1),  # Lower for consistency
+                'max_tokens': kwargs.get('max_tokens', self.default_max_tokens),
+                'timeout': 30,  # Reduced timeout
+                'stream': False,  # Disable streaming for speed
             }
             
-            for key, value in kwargs.items():
-                if key in openai_supported_args:
-                    filtered_kwargs[key] = value
-                elif key == 'stop_sequences':
-                    # Convert Gemini's stop_sequences to OpenAI's stop
-                    filtered_kwargs['stop'] = value
-                else:
-                    logger.warning(f"Filtering out unsupported parameter: {key}")
+            # Add frequency penalty to reduce repetition (if supported by model)
+            if "gpt" in self.model_name:
+                litellm_kwargs['frequency_penalty'] = 0.1
             
-            converted_messages = self.convert_messages(messages)
-            response = self.llm.invoke(converted_messages, **filtered_kwargs)
+            # Make the API call
+            response = litellm.completion(**litellm_kwargs)
             
-            # Post-process response to fix code block formatting
-            content = getattr(response, "content", str(response))
+            # Extract content from response
+            content = response.choices[0].message.content
             
-            # Convert markdown code blocks to <code> tags expected by CodeAgent
-            # Replace ```python or ```tool_code blocks with <code> tags
+            # Minimal post-processing for speed
             content = re.sub(r'```(?:python|tool_code)?\s*\n(.*?)\n```', r'<code>\1</code>', content, flags=re.DOTALL)
             
-            # Also handle single backtick code blocks
-            content = re.sub(r'`([^`]+)`', r'<code>\1</code>', content)
-            
-            # Create a modified response object
-            class ModifiedResponse:
-                def __init__(self, original_response, modified_content):
-                    self.content = modified_content
-                    # Copy other attributes from original response safely
-                    for attr in dir(original_response):
-                        if not attr.startswith('_') and attr != 'content':
-                            try:
-                                # Skip problematic Pydantic attributes
-                                if attr not in ['model_computed_fields', 'model_fields', 'model_config']:
-                                    setattr(self, attr, getattr(original_response, attr))
-                            except:
-                                pass
-            
-            modified_response = ModifiedResponse(response, content)
-            
-            class Result:
+            # Create optimized result object
+            class OptimizedLiteLLMResult:
                 def __init__(self, content, response_obj):
                     self.content = content
-                    # Add tool_calls attribute for ToolCallingAgent
-                    self.tool_calls = getattr(response_obj, 'tool_calls', None)
-                    usage_data = getattr(response_obj, 'usage_metadata', {})
-                    if isinstance(usage_data, dict):
+                    self.tool_calls = None
+                    
+                    # Minimal token usage tracking
+                    usage = getattr(response_obj, 'usage', None)
+                    if usage:
                         class TokenUsage:
-                            def __init__(self, data):
-                                self.input_tokens = data.get('input_tokens', 0)
-                                self.output_tokens = data.get('output_tokens', 0) 
-                                self.total_tokens = data.get('total_tokens', 0)
-                        self.token_usage = TokenUsage(usage_data)
+                            def __init__(self, usage_data):
+                                self.input_tokens = getattr(usage_data, 'prompt_tokens', 0)
+                                self.output_tokens = getattr(usage_data, 'completion_tokens', 0)
+                                self.total_tokens = getattr(usage_data, 'total_tokens', 0)
+                        self.token_usage = TokenUsage(usage)
                     else:
                         class TokenUsage:
                             def __init__(self):
@@ -162,34 +278,65 @@ class SafeLLMWrapper:
                                 self.total_tokens = 0
                         self.token_usage = TokenUsage()
             
-            return Result(content=content, response_obj=modified_response)
+            return OptimizedLiteLLMResult(content=content, response_obj=response)
+            
         except Exception as e:
-            logger.error(f"LLM.generate failed: {e}")
+            logger.error(f"Optimized LiteLLM.generate failed: {e}")
             raise
 
-    def __getattr__(self, name):
-        return getattr(self.llm, name)
+    def invoke(self, messages, **kwargs):
+        """Compatibility method for LangChain-style invoke"""
+        result = self.generate(messages, **kwargs)
+        
+        class SimpleResponse:
+            def __init__(self, content):
+                self.content = content
+        
+        return SimpleResponse(result.content)
 
 # ───────────────────────────────────────────────
-# Initialize Model
+# BACKWARD COMPATIBILITY
+# ───────────────────────────────────────────────
+def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
+    """Backward compatibility wrapper - uses fast agent"""
+    return create_fast_agent(use_knowledge_base, use_web_search)
+
+# ───────────────────────────────────────────────
+# PERFORMANCE MONITORING
+# ───────────────────────────────────────────────
+def get_agent_performance_stats():
+    """Get performance statistics for agents"""
+    from scripts.smolagent_tools import get_tools_performance_stats
+    
+    stats = get_tools_performance_stats()
+    
+    # Add agent-specific stats
+    stats['agent_info'] = {
+        'cached_agents': len(st.session_state.get('cached_agents', [])),
+        'model_name': os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+        'max_steps': 1,
+        'optimization_level': 'high'
+    }
+    
+    return stats
+
+# ───────────────────────────────────────────────
+# Initialize Model with LiteLLM
 # ───────────────────────────────────────────────
 @st.cache_resource
 def initialize_model():
-    logger.info("Initializing OpenAI language model...")
+    logger.info("Initializing LiteLLM language model...")
     try:
-        from langchain_openai import ChatOpenAI
-        raw_llm = ChatOpenAI(
-            model=os.getenv("AGENT_MODEL"),
-            temperature=0.2,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            request_timeout=3600,  # 1 hour timeout
-            max_retries=3,
-            timeout=3600  # Additional timeout parameter
-        )
-        logger.info("OpenAI model initialized successfully")
-        return SafeLLMWrapper(raw_llm)
+        model_name = os.getenv("AGENT_MODEL", "gpt-3.5-turbo")
+        api_key = os.getenv("OPENAI_API_KEY")
+        
+        # Create LiteLLM wrapper
+        llm = LiteLLMWrapper(model_name, api_key)
+        
+        logger.info(f"LiteLLM model initialized successfully: {model_name}")
+        return llm
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI model: {e}")
+        logger.error(f"Failed to initialize LiteLLM model: {e}")
         st.error(f"Failed to initialize model: {e}")
         return None
 
@@ -222,52 +369,6 @@ def initialize_base_agent():
         logger.error(f"Failed to create base agent: {e}")
         st.error(f"Failed to create base agent: {e}")
         return None, None
-
-def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
-    """Create agent with selected tools"""
-    llm, system_prompt = initialize_base_agent()
-    if not llm:
-        return None
-    
-    try:
-        # Select tools based on user preferences
-        selected_tools = []
-        if use_web_search:  # Always include web search
-            selected_tools.append(web_search_tool)
-        if use_knowledge_base:
-            selected_tools.append(knowledge_base_retriever)
-
-        logger.info(f"Creating CodeAgent with {len(selected_tools)} tools...")
-        
-        # Log the actual tool names for debugging
-        for tool in selected_tools:
-            tool_name = getattr(tool, 'name', str(tool))
-            logger.info(f"Available tool: {tool_name}")
-        
-        agent = CodeAgent(
-            tools=selected_tools,
-            model=llm,
-            max_steps=3, 
-            additional_authorized_imports=["re", "json", "os"]
-        )
-        
-        # Get actual tool names from the selected tools
-        tool_names = [tool.name for tool in selected_tools]
-        
-        logger.info(f"Actual tool names: {tool_names}")
-        
-        # Enhanced system prompt with correct tool names
-        enhanced_system_prompt = system_prompt.format(tool_names=tool_names)
-        
-        # Set enhanced system prompt
-        agent.prompt_templates["system_prompt"] = enhanced_system_prompt
-        
-        logger.info("Dynamic agent created successfully")
-        return agent
-    except Exception as e:
-        logger.error(f"Failed to create dynamic agent: {e}")
-        st.error(f"Failed to create dynamic agent: {e}")
-        return None
 
 def extract_citations_from_response(response_text, agent):
     """Extract and format citations from agent response"""
@@ -343,7 +444,8 @@ def chat_interface():
             "Enter your medical coding question:",
             placeholder="e.g., What is the CPT code for a routine colonoscopy?",
             height=100,
-            value=st.session_state.current_question
+            value=st.session_state.current_question,
+            key="chat_question_input"
         )
         
         # Update session state when text area changes
@@ -359,7 +461,7 @@ def chat_interface():
         ]
         
         for i, example in enumerate(examples):
-            if st.button(f"📝 {example}", key=f"example_{i}"):
+            if st.button(f"📝 {example}", key=f"chat_example_{i}"):
                 st.session_state.current_question = example
                 st.rerun()
 
@@ -371,13 +473,13 @@ def chat_interface():
         use_web_search = True  # Always True
         
         # Search options
-        use_knowledge_base = st.checkbox("🔍 Search Knowledge Base", value=True)
+        use_knowledge_base = st.checkbox("🔍 Search Knowledge Base", value=True, key="chat_use_kb")
         st.info("Knowledge base search is optional. Uncheck to skip searching the embedded documents.")
         # Display options
-        show_sources = st.checkbox("📖 Show Sources", value=True)
+        show_sources = st.checkbox("📖 Show Sources", value=True, key="chat_show_sources")
 
     # Submit button
-    if st.button("🚀 Get Answer", type="primary", use_container_width=True):
+    if st.button("🚀 Get Answer", type="primary", use_container_width=True, key="chat_get_answer"):
         if not st.session_state.current_question.strip():
             st.warning("Please enter a question!")
             return
@@ -466,7 +568,7 @@ def practice_test_interface():
         )
     
     # Add checkbox to skip extraction for development
-    skip_extraction = st.checkbox("Skip PDF extraction (use cached data)", value=False)
+    skip_extraction = st.checkbox("Skip PDF extraction (use cached data)", value=False, key="skip_extraction_cb")
     
     # Step 1 Button: Extract Questions and Answers
     extract_button_disabled = not skip_extraction and (not test_file or not answers_file)
@@ -474,7 +576,7 @@ def practice_test_interface():
     if st.button("🔍 Extract Questions and Answers", 
                  type="primary", 
                  disabled=extract_button_disabled,
-                 key="extract_button"):
+                 key="extract_questions_answers"):
         
         if skip_extraction:
             st.info("Using cached test data...")
@@ -608,11 +710,11 @@ def practice_test_interface():
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            use_knowledge_base = st.checkbox("Use Knowledge Base", value=True)
+            use_knowledge_base = st.checkbox("Use Knowledge Base", value=True, key="test_use_kb")
         with col2:
-            use_web_search = st.checkbox("Use Web Search", value=True)
+            use_web_search = st.checkbox("Use Web Search", value=True, key="test_use_web")
         with col3:
-            temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
+            temperature = st.slider("Temperature", 0.0, 1.0, 0.2, key="test_temperature")
         
         # Display agent configuration summary
         st.info(f"**Agent Configuration:**\n"
@@ -629,7 +731,7 @@ def practice_test_interface():
                      type="primary", 
                      use_container_width=True,
                      disabled=test_button_disabled,
-                     key="run_test_button"):
+                     key="run_automated_test"):
             
             # Check if base components are ready
             llm, system_prompt = initialize_base_agent()
@@ -724,7 +826,8 @@ def practice_test_interface():
                         "📥 Download Full Report",
                         data=report.encode('utf-8'),
                         file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                        mime="text/markdown"
+                        mime="text/markdown",
+                        key="download_report"
                     )
                     
                     # Show JSON results as well
@@ -733,7 +836,8 @@ def practice_test_interface():
                         "📥 Download Raw Results (JSON)",
                         data=json_data.encode('utf-8'),
                         file_name=f"practice_test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json"
+                        mime="application/json",
+                        key="download_json"
                     )
                     
                 except FileNotFoundError as e:
@@ -748,7 +852,7 @@ def practice_test_interface():
         st.markdown("---")
         st.subheader("🔄 Step 3: Start New Test")
         
-        if st.button("🆕 Start New Test", key="reset_test"):
+        if st.button("🆕 Start New Test", key="start_new_test"):
             st.session_state.test_workflow_state = {
                 'step': 1,
                 'questions_extracted': False,
@@ -785,9 +889,7 @@ def practice_test_interface():
     else:
         st.sidebar.info("⏳ Step 3: New Test Option")
 
-# ───────────────────────────────────────────────
-# MAIN APP WITH NAVIGATION
-# ───────────────────────────────────────────────
+# Main function
 def main():
     # Initialize session state
     if 'chat_history' not in st.session_state:
@@ -796,9 +898,38 @@ def main():
     # Navigation
     selected_page = st.sidebar.selectbox(
         "Select Page",
-        ["Chat Interface", "Practice Test"]
+        ["Chat Interface", "Practice Test"],
+        key="page_selector"
     )
     
+    # Add performance stats to sidebar
+    st.sidebar.markdown("### ⚡ Performance Stats")
+    
+    if st.button("📊 Show Performance", key="show_performance_stats"):
+        try:
+            stats = get_agent_performance_stats()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("KB Cache Hit Rate", f"{stats['knowledge_base']['hit_rate']:.1f}%")
+                st.metric("Web Cache Hit Rate", f"{stats['web_search']['hit_rate']:.1f}%")
+            
+            with col2:
+                st.metric("Model", stats['agent_info']['model_name'])
+                st.metric("Max Steps", stats['agent_info']['max_steps'])
+        except Exception as e:
+            st.error(f"Error getting stats: {e}")
+    
+    if st.button("🧹 Clear All Caches", key="clear_all_caches"):
+        try:
+            from scripts.smolagent_tools import clear_all_caches
+            clear_all_caches()
+            st.cache_resource.clear()
+            st.success("All caches cleared!")
+        except Exception as e:
+            st.error(f"Error clearing caches: {e}")
+    
+    # Route to appropriate interface
     if selected_page == "Chat Interface":
         chat_interface()
     elif selected_page == "Practice Test":
