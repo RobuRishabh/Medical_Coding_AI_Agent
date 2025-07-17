@@ -577,19 +577,19 @@ Format: A. [your reasoning here]"""
         """Run test using already extracted and cached data"""
         self.results['test_start_time'] = datetime.now()
         
-        # Look for existing cached data files
-        cached_data_path = "temp_test_data"
+        # Look for existing cached data files in the new location
+        cached_data_path = Path("Outputs/extraction")
         
-        if not os.path.exists(cached_data_path):
+        if not cached_data_path.exists():
             self.logger.error("No cached data found")
             raise FileNotFoundError("No cached test data found. Please run extraction first.")
         
         try:
             # Load cached questions and answers
-            with open(os.path.join(cached_data_path, "extracted_questions.json"), 'r') as f:
+            with open(cached_data_path / "extracted_questions.json", 'r') as f:
                 questions = json.load(f)
                 
-            with open(os.path.join(cached_data_path, "extracted_answers.json"), 'r') as f:
+            with open(cached_data_path / "extracted_answers.json", 'r') as f:
                 answers = json.load(f)
                 
             # Use the optimized method

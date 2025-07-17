@@ -9,6 +9,37 @@ from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool, T
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from datetime import datetime
 import litellm
+from pathlib import Path
+
+# ───────────────────────────────────────────────
+# LOGGING SETUP - Single Output.log file (overwrite mode)
+# ───────────────────────────────────────────────
+# Ensure Outputs directory exists
+outputs_dir = Path("Outputs")
+outputs_dir.mkdir(exist_ok=True)
+
+# Clear any existing handlers to avoid conflicts
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+# Configure logging to write to Output.log (overwrite each time)
+log_file_path = outputs_dir / "Output.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(str(log_file_path), mode='w', encoding='utf-8'),  # 'w' mode overwrites the file
+        logging.StreamHandler()
+    ],
+    force=True  # Force reconfiguration
+)
+
+logger = logging.getLogger(__name__)
+
+# Test logging immediately
+logger.info("=== Medical Coding AI Agent Application Started ===")
+logger.info(f"Log file location: {log_file_path.absolute()}")
+logger.info(f"Current working directory: {os.getcwd()}")
 
 # ───────────────────────────────────────────────
 # STREAMLIT PAGE CONFIG WITH TIMEOUT SETTINGS
@@ -20,6 +51,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+logger.info("Streamlit page config set successfully")
+
 # Configure Streamlit for long-running processes
 import streamlit.web.cli as stcli
 import sys
@@ -29,16 +62,21 @@ os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1000"
 os.environ["STREAMLIT_SERVER_MAX_MESSAGE_SIZE"] = "1000"
 os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
-# ───────────────────────────────────────────────
-# LOGGING SETUP
-# ───────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger.info("Streamlit environment variables configured")
 
 # ───────────────────────────────────────────────
 # LOAD ENV VARIABLES
 # ───────────────────────────────────────────────
 load_dotenv()
+logger.info("Environment variables loaded")
+
+# Check for required environment variables
+required_vars = ["OPENAI_API_KEY", "AGENT_MODEL"]
+for var in required_vars:
+    if os.getenv(var):
+        logger.info(f"Environment variable {var} is set")
+    else:
+        logger.warning(f"Environment variable {var} is not set")
 
 # ───────────────────────────────────────────────
 # Load system prompt
@@ -299,26 +337,8 @@ class LiteLLMWrapper:
 # ───────────────────────────────────────────────
 def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
     """Backward compatibility wrapper - uses fast agent"""
+    logger.info(f"Creating dynamic agent - KB: {use_knowledge_base}, Web: {use_web_search}")
     return create_fast_agent(use_knowledge_base, use_web_search)
-
-# ───────────────────────────────────────────────
-# PERFORMANCE MONITORING
-# ───────────────────────────────────────────────
-def get_agent_performance_stats():
-    """Get performance statistics for agents"""
-    from scripts.smolagent_tools import get_tools_performance_stats
-    
-    stats = get_tools_performance_stats()
-    
-    # Add agent-specific stats
-    stats['agent_info'] = {
-        'cached_agents': len(st.session_state.get('cached_agents', [])),
-        'model_name': os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
-        'max_steps': 1,
-        'optimization_level': 'high'
-    }
-    
-    return stats
 
 # ───────────────────────────────────────────────
 # Initialize Model with LiteLLM
@@ -345,8 +365,10 @@ def initialize_model():
 # ───────────────────────────────────────────────
 @st.cache_resource
 def initialize_base_agent():
+    logger.info("Initializing base agent...")
     llm = initialize_model()
     if not llm:
+        logger.error("Failed to initialize model for base agent")
         return None, None
     
     try:
@@ -426,6 +448,7 @@ def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
 
 def chat_interface():
     """Chat interface page"""
+    logger.info("Rendering chat interface")
     st.title("🩺 CPC Medical Coding Assistant - Chat Interface")
     st.markdown("---")
     
@@ -482,12 +505,16 @@ def chat_interface():
     if st.button("🚀 Get Answer", type="primary", use_container_width=True, key="chat_get_answer"):
         if not st.session_state.current_question.strip():
             st.warning("Please enter a question!")
+            logger.warning("User tried to submit empty question")
             return
+        
+        logger.info(f"User submitted question: {st.session_state.current_question[:100]}...")
         
         # Check if base components are ready
         llm, system_prompt = initialize_base_agent()
         if not llm or not system_prompt:
             st.error("❌ Agent Failed to Initialize")
+            logger.error("Failed to initialize base agent for chat")
             return
         
         # Show processing
@@ -500,6 +527,7 @@ def chat_interface():
                 agent = create_dynamic_agent(use_knowledge_base, use_web_search)
                 if not agent:
                     st.error("Failed to create agent with selected tools")
+                    logger.error("Failed to create dynamic agent")
                     return
                 
                 # Get response from agent
@@ -530,6 +558,7 @@ def chat_interface():
 
 def practice_test_interface():
     """Interface for automated practice test"""
+    logger.info("Rendering practice test interface")
     st.title("🩺 CPC Medical Coding Assistant - Practice Test")
     st.markdown("---")
     
@@ -544,6 +573,7 @@ def practice_test_interface():
             'extraction_results': None,
             'test_completed': False
         }
+        logger.info("Initialized test workflow state")
     
     # Step 1: File Upload and Extraction
     st.subheader("📁 Step 1: Upload Files and Extract Questions/Answers")
@@ -579,12 +609,14 @@ def practice_test_interface():
                  key="extract_questions_answers"):
         
         if skip_extraction:
+            logger.info("User chose to skip extraction, using cached data")
             st.info("Using cached test data...")
             st.session_state.test_workflow_state['questions_extracted'] = True
             st.session_state.test_workflow_state['answers_extracted'] = True
             st.session_state.test_workflow_state['step'] = 2
             st.success("✅ Using cached data - Ready for automated test!")
         else:
+            logger.info("Starting PDF extraction process")
             # Save uploaded files
             test_path = f"temp_test_{datetime.now().timestamp()}.pdf"
             answers_path = f"temp_answers_{datetime.now().timestamp()}.pdf"
@@ -593,6 +625,8 @@ def practice_test_interface():
                 f.write(test_file.read())
             with open(answers_path, "wb") as f:
                 f.write(answers_file.read())
+            
+            logger.info(f"Saved uploaded files: {test_path}, {answers_path}")
             
             # Extract questions and answers
             with st.spinner("🔄 Extracting questions and answers from PDFs..."):
@@ -679,11 +713,14 @@ def practice_test_interface():
                     
                     # Save extracted data for debugging
                     processor.save_extracted_data(questions_data, answers_data)
+                    logger.info("Extraction process completed successfully")
                     
                 except ImportError as e:
+                    logger.error(f"Missing module during extraction: {e}")
                     st.error(f"❌ Missing module: {str(e)}")
                     st.info("Please ensure test_processor.py is available in the scripts directory.")
                 except Exception as e:
+                    logger.error(f"Error during extraction: {e}")
                     st.error(f"❌ Error during extraction: {str(e)}")
                     st.info("Please check the PDF files and try again.")
                     # Clean up temporary files on error
@@ -733,10 +770,13 @@ def practice_test_interface():
                      disabled=test_button_disabled,
                      key="run_automated_test"):
             
+            logger.info("Starting automated test execution")
+            
             # Check if base components are ready
             llm, system_prompt = initialize_base_agent()
             if not llm or not system_prompt:
                 st.error("❌ Agent Failed to Initialize")
+                logger.error("Agent failed to initialize for test execution")
                 return
             
             # Create a single progress bar and status text outside the test execution
@@ -755,18 +795,23 @@ def practice_test_interface():
                         'timeout': 3600
                     }
                     
+                    logger.info(f"Created agent config: {agent_config}")
+                    
                     # Create a callback for progress updates using the single progress bar
                     def progress_callback(current, total, message):
                         progress = current / total if total > 0 else 0
                         progress_bar.progress(progress)
                         status_text.text(f"Progress: {current}/{total} - {message}")
+                        logger.info(f"Test progress: {current}/{total} - {message}")
                     
                     runner = AutomatedTestRunner(agent_config)
                     
                     # Use cached data if available, otherwise run full test
                     if skip_extraction:
+                        logger.info("Running test with cached data")
                         results = runner.run_test_with_cached_data(progress_callback=progress_callback)
                     else:
+                        logger.info("Running test with extracted data")
                         # Use the extracted data from step 1
                         extraction_results = st.session_state.test_workflow_state['extraction_results']
                         results = runner.run_test_with_extracted_data(
@@ -782,14 +827,17 @@ def practice_test_interface():
                             answers_path = st.session_state.test_workflow_state['extraction_results']['answers_path']
                             if os.path.exists(test_path):
                                 os.remove(test_path)
+                                logger.info(f"Cleaned up {test_path}")
                             if os.path.exists(answers_path):
                                 os.remove(answers_path)
+                                logger.info(f"Cleaned up {answers_path}")
                         except Exception as e:
                             logger.warning(f"Failed to clean up temporary files: {e}")
                     
                     # Check if results is None
                     if results is None:
                         st.error("❌ Test runner returned no results")
+                        logger.error("Test runner returned None results")
                         return
                     
                     # Clear the progress bar and status text after completion
@@ -801,6 +849,7 @@ def practice_test_interface():
                     
                     # Display results
                     st.success(f"🎉 Test completed! Score: {results['score_percentage']:.1f}%")
+                    logger.info(f"Test completed with score: {results['score_percentage']:.1f}%")
                     
                     # Display detailed results
                     st.subheader("📊 Test Results Summary")
@@ -841,9 +890,11 @@ def practice_test_interface():
                     )
                     
                 except FileNotFoundError as e:
+                    logger.error(f"Cached data not found: {e}")
                     st.error(f"❌ Cached data not found: {str(e)}")
                     st.info("Please run the test with PDFs first to generate cached data.")
                 except Exception as e:
+                    logger.error(f"Error running test: {e}")
                     st.error(f"❌ Error running test: {str(e)}")
                     st.info("Please check the logs for more details.")
     
@@ -853,6 +904,7 @@ def practice_test_interface():
         st.subheader("🔄 Step 3: Start New Test")
         
         if st.button("🆕 Start New Test", key="start_new_test"):
+            logger.info("User started new test, resetting workflow state")
             st.session_state.test_workflow_state = {
                 'step': 1,
                 'questions_extracted': False,
@@ -891,9 +943,12 @@ def practice_test_interface():
 
 # Main function
 def main():
+    logger.info("Application main function started")
+    
     # Initialize session state
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+        logger.info("Initialized chat history in session state")
     
     # Navigation
     selected_page = st.sidebar.selectbox(
@@ -902,32 +957,7 @@ def main():
         key="page_selector"
     )
     
-    # Add performance stats to sidebar
-    st.sidebar.markdown("### ⚡ Performance Stats")
-    
-    if st.button("📊 Show Performance", key="show_performance_stats"):
-        try:
-            stats = get_agent_performance_stats()
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("KB Cache Hit Rate", f"{stats['knowledge_base']['hit_rate']:.1f}%")
-                st.metric("Web Cache Hit Rate", f"{stats['web_search']['hit_rate']:.1f}%")
-            
-            with col2:
-                st.metric("Model", stats['agent_info']['model_name'])
-                st.metric("Max Steps", stats['agent_info']['max_steps'])
-        except Exception as e:
-            st.error(f"Error getting stats: {e}")
-    
-    if st.button("🧹 Clear All Caches", key="clear_all_caches"):
-        try:
-            from scripts.smolagent_tools import clear_all_caches
-            clear_all_caches()
-            st.cache_resource.clear()
-            st.success("All caches cleared!")
-        except Exception as e:
-            st.error(f"Error clearing caches: {e}")
+    logger.info(f"User selected page: {selected_page}")
     
     # Route to appropriate interface
     if selected_page == "Chat Interface":
@@ -936,4 +966,6 @@ def main():
         practice_test_interface()
 
 if __name__ == "__main__":
+    logger.info("=== Starting Medical Coding AI Agent Application ===")
     main()
+    logger.info("=== Application execution completed ===")

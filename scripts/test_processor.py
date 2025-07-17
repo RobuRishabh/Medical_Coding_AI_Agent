@@ -619,19 +619,19 @@ class TestProcessor:
         
         return partial_question
 
-    def save_extracted_data(self, questions: List[Dict], answers: List[str], output_dir: str = "temp_test_data"):
+    def save_extracted_data(self, questions: List[Dict], answers: List[str], output_dir: str = "Outputs/extraction"):
         """Save extracted questions and answers with comprehensive validation"""
         output_path = Path(output_dir)
-        output_path.mkdir(exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)  # This will create the directory if it doesn't exist
         
         # Save questions
         with open(output_path / "extracted_questions.json", 'w', encoding='utf-8') as f:
             json.dump(questions, f, indent=2, ensure_ascii=False)
-        
+    
         # Save answers
         with open(output_path / "extracted_answers.json", 'w', encoding='utf-8') as f:
             json.dump(answers, f, indent=2, ensure_ascii=False)
-        
+    
         # Save formatted view with validation
         with open(output_path / "formatted_test.md", 'w', encoding='utf-8') as f:
             f.write("# Extracted Test Data\n\n")
@@ -650,7 +650,7 @@ class TestProcessor:
                     f.write(f"\n**Correct Answer**: {answers[i]}\n\n")
                 else:
                     f.write(f"\n**Correct Answer**: NOT FOUND\n\n")
-        
+    
         # Add comprehensive validation summary with explicit UTF-8 encoding
         with open(output_path / "validation_summary.txt", 'w', encoding='utf-8') as f:
             f.write(f"Extraction Validation Summary\n")
@@ -686,7 +686,7 @@ class TestProcessor:
                     f.write(f"WARNING: {len(invalid_answers)} invalid answers found: {set(invalid_answers)}\n")
                 else:
                     f.write("All answers are valid (A, B, C, D)\n")
-    
+
         self.logger.info(f"Extracted data saved to {output_path}")
         
         # Log validation results

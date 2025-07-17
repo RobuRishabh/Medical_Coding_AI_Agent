@@ -14,15 +14,11 @@ from collections import OrderedDict
 import threading
 
 # ───────────────────────────────────────────────
-# LOGGING SETUP
+# LOGGING SETUP - Remove file handler
 # ───────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,  # Reduced from DEBUG for better performance
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('smolagent_tools.log'),
-        logging.StreamHandler()
-    ]
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 

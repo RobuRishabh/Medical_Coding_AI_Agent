@@ -4,14 +4,10 @@ import pdfplumber
 from pathlib import Path
 import logging
 
-# Configure logging
+# Configure logging to use the main Output.log
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('pdf_conversion.log'),
-        logging.StreamHandler()
-    ]
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
