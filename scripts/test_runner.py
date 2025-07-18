@@ -6,7 +6,6 @@ from pathlib import Path
 import sys
 from scripts.test_processor import TestProcessor
 from smolagents import CodeAgent
-import streamlit as st
 from typing import Dict, List
 import re
 import os
@@ -487,8 +486,8 @@ Format: A. [your reasoning here]"""
             self.logger.error("No answers extracted from answer key")
             raise Exception("No answers could be extracted from the answer key PDF. Please check the file format.")
         
-        # Show extraction results
-        st.success(f"✅ Successfully extracted {len(questions)} questions and {len(correct_answers)} answers")
+        # Log extraction results instead of using Streamlit
+        self.logger.info(f"Successfully extracted {len(questions)} questions and {len(correct_answers)} answers")
         
         if len(questions) != len(correct_answers):
             self.logger.warning(f"Mismatch: {len(questions)} questions vs {len(correct_answers)} answers")
@@ -565,8 +564,8 @@ Format: A. [your reasoning here]"""
             if 'question_number' not in question:
                 question['question_number'] = i + 1
         
-        # Show extracted data info
-        st.success(f"✅ Using extracted data: {len(questions)} questions and {len(answers)} answers")
+        # Log extracted data info instead of using Streamlit
+        self.logger.info(f"Using extracted data: {len(questions)} questions and {len(answers)} answers")
         
         # Ensure questions and answers match in count
         if len(questions) != len(answers):

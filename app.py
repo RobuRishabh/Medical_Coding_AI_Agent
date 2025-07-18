@@ -772,6 +772,13 @@ def practice_test_interface():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
+            # Create progress callback for UI updates
+            def progress_callback(current, total, message):
+                progress = current / total if total > 0 else 0
+                progress_bar.progress(progress)
+                status_text.text(f"Progress: {current}/{total} - {message}")
+                logger.info(f"Test progress: {current}/{total} - {message}")
+            
             # Run automated test
             with st.spinner("🔄 Running automated test..."):
                 try:
@@ -785,13 +792,6 @@ def practice_test_interface():
                     }
                     
                     logger.info(f"Created agent config: {agent_config}")
-                    
-                    # Create a callback for progress updates using the single progress bar
-                    def progress_callback(current, total, message):
-                        progress = current / total if total > 0 else 0
-                        progress_bar.progress(progress)
-                        status_text.text(f"Progress: {current}/{total} - {message}")
-                        logger.info(f"Test progress: {current}/{total} - {message}")
                     
                     runner = AutomatedTestRunner(agent_config)
                     
