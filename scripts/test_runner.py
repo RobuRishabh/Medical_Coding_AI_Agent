@@ -10,7 +10,6 @@ import streamlit as st
 from typing import Dict, List
 import re
 import os
-import asyncio
 import concurrent.futures
 from functools import partial
 import threading
@@ -35,13 +34,12 @@ class AutomatedTestRunner:
         self.practice_test_prompt = self._load_practice_test_prompt()
         
         # Optimized settings
-        self.batch_size = 5  # Increased from 3
-        self.max_workers = 3  # Increased from 2
-        self.inter_batch_delay = 2  # Reduced from 3 seconds
+        self.batch_size = 5
+        self.max_workers = 3
+        self.inter_batch_delay = 2
         
-        # Pre-create agent pool for better performance
+        # Agent pool (no caching, created fresh each time)
         self.agent_pool = []
-        self._initialize_agent_pool()
         
     def _initialize_agent_pool(self):
         """Initialize a pool of agents for parallel processing"""
@@ -59,7 +57,10 @@ class AutomatedTestRunner:
             self.agent_pool = []
 
     def _get_agent_from_pool(self, index: int):
-        """Get an agent from the pool"""
+        """Get an agent from the pool, creating pool if needed"""
+        if not self.agent_pool:
+            self._initialize_agent_pool()
+        
         if self.agent_pool:
             return self.agent_pool[index % len(self.agent_pool)]
         else:
@@ -110,8 +111,7 @@ Format: A. [your reasoning here]"""
         
     def _calculate_delay(self, question_index: int) -> int:
         """Calculate delay between questions to respect rate limits"""
-        # Reduced delays for batch processing
-        base_delay = 2  # Reduced from 4 seconds
+        base_delay = 2
         
         # Progressive delay
         if question_index < 5:
@@ -160,8 +160,12 @@ Format: A. [your reasoning here]"""
     def _process_question_batch(self, questions_batch: List[Dict], 
                               answers_batch: List[str], 
                               start_idx: int) -> List[Dict]:
-        """Process a batch of questions using optimized agent pool"""
+        """Process a batch of questions using agent pool"""
         results = []
+        
+        # Initialize agent pool if not already done
+        if not self.agent_pool:
+            self._initialize_agent_pool()
         
         # Use agent pool if available
         if not self.agent_pool:
@@ -187,7 +191,7 @@ Format: A. [your reasoning here]"""
             for future in concurrent.futures.as_completed(future_to_question):
                 question_num = future_to_question[future]
                 try:
-                    result = future.result(timeout=90)  # Reduced from 120 seconds
+                    result = future.result(timeout=90)
                     if result:
                         results.append(result)
                 except concurrent.futures.TimeoutError:
@@ -253,41 +257,43 @@ Format: A. [your reasoning here]"""
         results.sort(key=lambda x: x['question_number'])
         return results
     
-    def _warm_up_caches(self, questions: List[Dict]) -> None:
-        """Warm up caches with common medical coding terms"""
-        self.logger.info("Warming up tool caches...")
+    def _warm_up_agents(self, questions: List[Dict]) -> None:
+        """Warm up agents with common medical coding terms"""
+        self.logger.info("Warming up agents...")
         
         # Extract common terms from questions
         common_terms = set()
-        for question in questions[:10]:  # Use first 10 questions
+        for question in questions[:5]:  # Use first 5 questions
             question_text = question['question'].lower()
             # Extract medical terms
             medical_terms = re.findall(r'\b(?:cpt|icd|procedure|diagnosis|code|medical)\b', question_text)
             common_terms.update(medical_terms)
         
-        # Pre-cache common searches
-        if common_terms:
-            agent = self._create_optimized_agent()
-            if agent:
-                for term in list(common_terms)[:5]:  # Limit to 5 terms
-                    try:
-                        agent.run(f"What is {term}?")
-                    except:
-                        pass  # Ignore errors during warm-up
+        # Pre-warm agents with common searches
+        if common_terms and self.agent_pool:
+            for i, agent in enumerate(self.agent_pool[:2]):  # Only warm first 2 agents
+                try:
+                    term = list(common_terms)[i % len(common_terms)]
+                    agent.run(f"What is {term}?")
+                except:
+                    pass  # Ignore errors during warm-up
         
-        self.logger.info("Cache warm-up completed")
+        self.logger.info("Agent warm-up completed")
     
     def run_test_optimized(self, questions: List[Dict], answers: List[str], 
                           progress_callback=None) -> Dict:
-        """Run test with optimized batch processing and cache warm-up"""
+        """Run test with optimized batch processing"""
         self.results['test_start_time'] = datetime.now()
         
         # Validate input
         if not questions or not answers:
             raise ValueError("Questions and answers cannot be empty")
         
-        # Warm up caches
-        self._warm_up_caches(questions)
+        # Initialize agent pool
+        self._initialize_agent_pool()
+        
+        # Warm up agents
+        self._warm_up_agents(questions)
         
         # Ensure questions have question_number field
         for i, question in enumerate(questions):
@@ -363,7 +369,7 @@ Format: A. [your reasoning here]"""
                 reasoning = self._extract_reasoning(full_response, answer)
                 
                 return answer, reasoning
-                
+                 
             except Exception as e:
                 error_msg = str(e)
                 
@@ -574,7 +580,7 @@ Format: A. [your reasoning here]"""
         return self.run_test_optimized(questions, answers, progress_callback)
 
     def run_test_with_cached_data(self, progress_callback=None):
-        """Run test using already extracted and cached data"""
+        """Run test using already extracted and cached data (JSON caching only)"""
         self.results['test_start_time'] = datetime.now()
         
         # Look for existing cached data files in the new location
@@ -586,10 +592,10 @@ Format: A. [your reasoning here]"""
         
         try:
             # Load cached questions and answers
-            with open(cached_data_path / "extracted_questions.json", 'r') as f:
+            with open(cached_data_path / "questions.json", 'r') as f:
                 questions = json.load(f)
                 
-            with open(cached_data_path / "extracted_answers.json", 'r') as f:
+            with open(cached_data_path / "answers.json", 'r') as f:
                 answers = json.load(f)
                 
             # Use the optimized method

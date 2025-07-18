@@ -81,7 +81,6 @@ for var in required_vars:
 # ───────────────────────────────────────────────
 # Load system prompt
 # ───────────────────────────────────────────────
-@st.cache_data
 def load_system_prompt(path="prompts.json") -> str:
     logger.info(f"Loading system prompt from {path}")
     try:
@@ -96,12 +95,11 @@ def load_system_prompt(path="prompts.json") -> str:
         return "You are a medical coding assistant."
 
 # ───────────────────────────────────────────────
-# OPTIMIZED AGENT CREATION WITH CACHING
+# AGENT CREATION WITHOUT CACHING
 # ───────────────────────────────────────────────
-@st.cache_resource
 def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = True):
-    """Create a faster, more efficient agent with caching"""
-    logger.info("Creating optimized fast agent...")
+    """Create a fast agent without caching"""
+    logger.info("Creating fast agent...")
     
     try:
         # Use LiteLLM wrapper for faster responses
@@ -110,12 +108,12 @@ def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = Tr
             api_key=os.getenv("OPENAI_API_KEY")
         )
         
-        # Optimize tool selection - use cached tool instances
+        # Select tools based on parameters
         selected_tools = []
         if use_web_search:
-            selected_tools.append(web_search_tool)  # Use cached instance
+            selected_tools.append(web_search_tool)
         if use_knowledge_base:
-            selected_tools.append(knowledge_base_retriever)  # Use cached instance
+            selected_tools.append(knowledge_base_retriever)
         
         logger.info(f"Creating agent with {len(selected_tools)} tools")
         
@@ -125,7 +123,6 @@ def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = Tr
             model=llm_wrapper,
             max_steps=1,  # Keep this low for speed
             additional_authorized_imports=["re", "json", "os"]
-            # Removed verbose parameter as it's not supported
         )
         
         # Load and set optimized system prompt
@@ -144,7 +141,6 @@ def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = Tr
         st.error(f"Failed to create fast agent: {e}")
         return None
 
-@st.cache_resource
 def create_test_optimized_agent():
     """Create agent specifically optimized for test taking"""
     logger.info("Creating test-optimized agent...")
@@ -165,7 +161,6 @@ def create_test_optimized_agent():
             model=llm_wrapper,
             max_steps=1,  # Single step for faster responses
             additional_authorized_imports=["re", "json", "os"]
-            # Removed verbose parameter as it's not supported
         )
         
         # Load test-specific system prompt
@@ -188,7 +183,6 @@ def create_test_optimized_agent():
 # ───────────────────────────────────────────────
 # AGENT POOL FOR PARALLEL PROCESSING
 # ───────────────────────────────────────────────
-@st.cache_resource
 def create_agent_pool(pool_size: int = 3):
     """Create a pool of agents for parallel processing"""
     logger.info(f"Creating agent pool with {pool_size} agents...")
@@ -207,7 +201,7 @@ def create_agent_pool(pool_size: int = 3):
     return agent_pool
 
 # ───────────────────────────────────────────────
-# OPTIMIZED LITELLM WRAPPER
+# LITELLM WRAPPER WITHOUT CACHING
 # ───────────────────────────────────────────────
 class LiteLLMWrapper:
     def __init__(self, model_name, api_key=None):
@@ -215,25 +209,24 @@ class LiteLLMWrapper:
         if api_key:
             litellm.api_key = api_key
         
-        # Aggressive optimizations for speed
-        litellm.request_timeout = 30  # Reduced from 60 seconds
-        litellm.caching = True
-        litellm.max_retries = 1  # Reduced retries for speed
+        # Optimizations for speed
+        litellm.request_timeout = 30
+        litellm.max_retries = 1
         
         # Set model-specific optimizations
         if "gpt-3.5" in model_name:
             self.default_max_tokens = 800
         elif "gpt-4" in model_name:
             self.default_max_tokens = 1000
-        elif "nano" in model_name.lower():  # For your gpt-4.1-nano model
-            self.default_max_tokens = 600  # Smaller for nano model
+        elif "nano" in model_name.lower():
+            self.default_max_tokens = 600
         else:
             self.default_max_tokens = 600
         
         logger.info(f"LiteLLM optimized for speed with model: {model_name}")
 
     def convert_messages(self, messages):
-        """Convert messages to LiteLLM format (optimized version)"""
+        """Convert messages to LiteLLM format"""
         if not isinstance(messages, list):
             messages = [messages]
             
@@ -249,14 +242,12 @@ class LiteLLMWrapper:
             elif role == "system":
                 converted.append({"role": "system", "content": content})
             elif hasattr(role, 'value') and role.value == 'tool-response':
-                # Handle tool responses more efficiently
                 if isinstance(content, list) and len(content) > 0:
                     text_content = content[0].get('text', str(content))
                 else:
                     text_content = str(content)
                 converted.append({"role": "user", "content": text_content})
             else:
-                # Fallback conversion
                 if isinstance(content, list) and len(content) > 0:
                     text_content = content[0].get('text', str(content))
                 else:
@@ -270,14 +261,14 @@ class LiteLLMWrapper:
             # Convert messages to LiteLLM format
             litellm_messages = self.convert_messages(messages)
             
-            # Optimized parameters for speed (especially for nano model)
+            # Parameters for speed
             litellm_kwargs = {
                 'model': self.model_name,
                 'messages': litellm_messages,
-                'temperature': kwargs.get('temperature', 0.1),  # Lower for consistency
+                'temperature': kwargs.get('temperature', 0.1),
                 'max_tokens': kwargs.get('max_tokens', self.default_max_tokens),
-                'timeout': 30,  # Reduced timeout
-                'stream': False,  # Disable streaming for speed
+                'timeout': 30,
+                'stream': False,
             }
             
             # Add frequency penalty to reduce repetition (if supported by model)
@@ -293,13 +284,13 @@ class LiteLLMWrapper:
             # Minimal post-processing for speed
             content = re.sub(r'```(?:python|tool_code)?\s*\n(.*?)\n```', r'<code>\1</code>', content, flags=re.DOTALL)
             
-            # Create optimized result object
-            class OptimizedLiteLLMResult:
+            # Create result object
+            class LiteLLMResult:
                 def __init__(self, content, response_obj):
                     self.content = content
                     self.tool_calls = None
                     
-                    # Minimal token usage tracking
+                    # Token usage tracking
                     usage = getattr(response_obj, 'usage', None)
                     if usage:
                         class TokenUsage:
@@ -316,10 +307,10 @@ class LiteLLMWrapper:
                                 self.total_tokens = 0
                         self.token_usage = TokenUsage()
             
-            return OptimizedLiteLLMResult(content=content, response_obj=response)
+            return LiteLLMResult(content=content, response_obj=response)
             
         except Exception as e:
-            logger.error(f"Optimized LiteLLM.generate failed: {e}")
+            logger.error(f"LiteLLM.generate failed: {e}")
             raise
 
     def invoke(self, messages, **kwargs):
@@ -336,14 +327,13 @@ class LiteLLMWrapper:
 # BACKWARD COMPATIBILITY
 # ───────────────────────────────────────────────
 def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
-    """Backward compatibility wrapper - uses fast agent"""
+    """Create dynamic agent without caching"""
     logger.info(f"Creating dynamic agent - KB: {use_knowledge_base}, Web: {use_web_search}")
     return create_fast_agent(use_knowledge_base, use_web_search)
 
 # ───────────────────────────────────────────────
 # Initialize Model with LiteLLM
 # ───────────────────────────────────────────────
-@st.cache_resource
 def initialize_model():
     logger.info("Initializing LiteLLM language model...")
     try:
@@ -361,9 +351,8 @@ def initialize_model():
         return None
 
 # ───────────────────────────────────────────────
-# Initialize Agent with dynamic tools
+# Initialize Agent
 # ───────────────────────────────────────────────
-@st.cache_resource
 def initialize_base_agent():
     logger.info("Initializing base agent...")
     llm = initialize_model()
