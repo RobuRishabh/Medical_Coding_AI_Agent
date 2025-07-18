@@ -32,52 +32,116 @@ class AutomatedTestRunner:
         # Load the practice test prompt
         self.practice_test_prompt = self._load_practice_test_prompt()
         
-        # Optimized settings
-        self.batch_size = 5
-        self.max_workers = 3
-        self.inter_batch_delay = 2
+        # Single agent - no pool needed
+        self.agent = None
         
-        # Agent pool (no caching, created fresh each time)
-        self.agent_pool = []
+    def _create_single_agent(self):
+        """Create a single optimized agent for test taking"""
+        if self.agent is None:
+            # Import from parent directory
+            sys.path.append(str(Path(__file__).parent.parent))
+            from app import create_test_optimized_agent
+            
+            try:
+                self.agent = create_test_optimized_agent()
+                self.logger.info("Single agent created successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to create agent: {e}")
+                self.agent = None
         
-    def _initialize_agent_pool(self):
-        """Initialize a pool of agents for parallel processing"""
-        self.logger.info("Initializing agent pool...")
+        return self.agent
+
+    def run_test_simplified(self, questions: List[Dict], answers: List[str], 
+                          progress_callback=None) -> Dict:
+        """Run test with single agent - simplified approach"""
+        self.results['test_start_time'] = datetime.now()
         
-        # Import from parent directory
-        sys.path.append(str(Path(__file__).parent.parent))
-        from app import create_agent_pool
+        # Validate input
+        if not questions or not answers:
+            raise ValueError("Questions and answers cannot be empty")
+        
+        # Create single agent
+        agent = self._create_single_agent()
+        if not agent:
+            raise Exception("Failed to create agent")
+        
+        # Process questions sequentially
+        total_questions = len(questions)
+        self.logger.info(f"Starting test with {total_questions} questions using single agent")
+        
+        for i, (question_data, correct_answer) in enumerate(zip(questions, answers)):
+            question_num = i + 1
+            
+            if progress_callback:
+                progress_callback(i, total_questions, f"Processing question {question_num}/{total_questions}")
+            
+            try:
+                # Process single question
+                result = self._process_single_question(agent, question_data, correct_answer, question_num)
+                
+                # Update results
+                if result['is_correct']:
+                    self.results['correct_answers'] += 1
+                self.results['questions_answered'] += 1
+                
+                self.results['detailed_results'].append(result)
+                
+                # Small delay between questions to respect rate limits
+                if i < total_questions - 1:  # Don't delay after last question
+                    time.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Error processing question {question_num}: {e}")
+                # Add error result
+                self.results['detailed_results'].append({
+                    'question_number': question_num,
+                    'question': question_data.get('question', 'Error'),
+                    'options': question_data.get('options', []),
+                    'agent_answer': 'A',
+                    'correct_answer': correct_answer,
+                    'is_correct': False,
+                    'reasoning': f'Error occurred: {str(e)}'
+                })
+                self.results['questions_answered'] += 1
+        
+        # Calculate final score
+        if self.results['questions_answered'] > 0:
+            self.results['score_percentage'] = (
+                self.results['correct_answers'] / self.results['questions_answered'] * 100
+            )
+        
+        self.results['test_end_time'] = datetime.now()
+        return self.results
+
+    def run_test_with_extracted_data(self, questions: List[Dict], answers: List[str], progress_callback=None):
+        """Run test using pre-extracted questions and answers"""
+        return self.run_test_simplified(questions, answers, progress_callback)
+
+    def run_test_with_cached_data(self, progress_callback=None):
+        """Run test using cached data"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Look for existing cached data files
+        cached_data_path = Path("Outputs/extraction")
+        
+        if not cached_data_path.exists():
+            self.logger.error("No cached data found")
+            raise FileNotFoundError("No cached test data found. Please run extraction first.")
         
         try:
-            self.agent_pool = create_agent_pool(pool_size=self.max_workers)
-            self.logger.info(f"Agent pool initialized with {len(self.agent_pool)} agents")
+            # Load cached questions and answers
+            with open(cached_data_path / "questions.json", 'r') as f:
+                questions = json.load(f)
+                
+            with open(cached_data_path / "answers.json", 'r') as f:
+                answers = json.load(f)
+                
+            # Use the simplified method
+            return self.run_test_simplified(questions, answers, progress_callback)
+            
         except Exception as e:
-            self.logger.error(f"Failed to initialize agent pool: {e}")
-            self.agent_pool = []
-
-    def _get_agent_from_pool(self, index: int):
-        """Get an agent from the pool, creating pool if needed"""
-        if not self.agent_pool:
-            self._initialize_agent_pool()
-        
-        if self.agent_pool:
-            return self.agent_pool[index % len(self.agent_pool)]
-        else:
-            # Fallback to creating individual agent
-            return self._create_optimized_agent()
-
-    def _create_optimized_agent(self):
-        """Create agent optimized for test taking"""
-        # Import from parent directory
-        sys.path.append(str(Path(__file__).parent.parent))
-        from app import create_test_optimized_agent
-        
-        try:
-            agent = create_test_optimized_agent()
-            return agent
-        except Exception as e:
-            self.logger.error(f"Failed to create agent: {e}")
-            return None
+            self.logger.error(f"Error loading cached data: {e}")
+            raise Exception(f"Failed to load cached test data: {e}")
 
     def _load_practice_test_prompt(self) -> str:
         """Load practice test prompt from prompts.json"""
@@ -156,106 +220,6 @@ Format: A. [your reasoning here]"""
                 'reasoning': f'Error occurred: {str(e)}'
             }
     
-    def _process_question_batch(self, questions_batch: List[Dict], 
-                              answers_batch: List[str], 
-                              start_idx: int) -> List[Dict]:
-        """Process a batch of questions using agent pool"""
-        results = []
-        
-        # Initialize agent pool if not already done
-        if not self.agent_pool:
-            self._initialize_agent_pool()
-        
-        # Use agent pool if available
-        if not self.agent_pool:
-            self.logger.warning("No agents in pool, creating individual agents")
-            return self._process_question_batch_fallback(questions_batch, answers_batch, start_idx)
-        
-        # Process questions in parallel using the agent pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_question = {}
-            
-            for i, (question_data, correct_answer) in enumerate(zip(questions_batch, answers_batch)):
-                # Use agent from pool
-                agent = self._get_agent_from_pool(i)
-                question_num = start_idx + i + 1
-                
-                future = executor.submit(
-                    self._process_single_question,
-                    agent, question_data, correct_answer, question_num
-                )
-                future_to_question[future] = question_num
-            
-            # Collect results with shorter timeout
-            for future in concurrent.futures.as_completed(future_to_question):
-                question_num = future_to_question[future]
-                try:
-                    result = future.result(timeout=90)
-                    if result:
-                        results.append(result)
-                except concurrent.futures.TimeoutError:
-                    self.logger.error(f"Timeout processing question {question_num}")
-                    # Add timeout result
-                    results.append({
-                        'question_number': question_num,
-                        'question': 'Timeout occurred',
-                        'options': [],
-                        'agent_answer': 'A',
-                        'correct_answer': answers_batch[question_num - start_idx - 1],
-                        'is_correct': False,
-                        'reasoning': 'Processing timed out'
-                    })
-                except Exception as e:
-                    self.logger.error(f"Exception processing question {question_num}: {e}")
-        
-        # Sort results by question number
-        results.sort(key=lambda x: x['question_number'])
-        return results
-
-    def _process_question_batch_fallback(self, questions_batch: List[Dict], 
-                                       answers_batch: List[str], 
-                                       start_idx: int) -> List[Dict]:
-        """Fallback batch processing without agent pool"""
-        results = []
-        
-        # Create agents for each worker
-        agents = []
-        for _ in range(min(self.max_workers, len(questions_batch))):
-            agent = self._create_optimized_agent()
-            if agent:
-                agents.append(agent)
-        
-        if not agents:
-            self.logger.error("No agents created for batch processing")
-            return []
-        
-        # Process with fallback method
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_question = {}
-            
-            for i, (question_data, correct_answer) in enumerate(zip(questions_batch, answers_batch)):
-                agent = agents[i % len(agents)]
-                question_num = start_idx + i + 1
-                
-                future = executor.submit(
-                    self._process_single_question,
-                    agent, question_data, correct_answer, question_num
-                )
-                future_to_question[future] = question_num
-            
-            # Collect results
-            for future in concurrent.futures.as_completed(future_to_question):
-                question_num = future_to_question[future]
-                try:
-                    result = future.result(timeout=90)
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    self.logger.error(f"Exception processing question {question_num}: {e}")
-        
-        results.sort(key=lambda x: x['question_number'])
-        return results
-    
     def _warm_up_agents(self, questions: List[Dict]) -> None:
         """Warm up agents with common medical coding terms"""
         self.logger.info("Warming up agents...")
@@ -269,8 +233,8 @@ Format: A. [your reasoning here]"""
             common_terms.update(medical_terms)
         
         # Pre-warm agents with common searches
-        if common_terms and self.agent_pool:
-            for i, agent in enumerate(self.agent_pool[:2]):  # Only warm first 2 agents
+        if common_terms and self.agent:
+            for i, agent in enumerate([self.agent]):  # Only warm the single agent
                 try:
                     term = list(common_terms)[i % len(common_terms)]
                     agent.run(f"What is {term}?")
@@ -288,10 +252,12 @@ Format: A. [your reasoning here]"""
         if not questions or not answers:
             raise ValueError("Questions and answers cannot be empty")
         
-        # Initialize agent pool
-        self._initialize_agent_pool()
+        # Create single agent
+        agent = self._create_single_agent()
+        if not agent:
+            raise Exception("Failed to create agent")
         
-        # Warm up agents
+        # Warm up agent
         self._warm_up_agents(questions)
         
         # Ensure questions have question_number field
@@ -303,38 +269,28 @@ Format: A. [your reasoning here]"""
         total_questions = len(questions)
         processed_results = []
         
-        self.logger.info(f"Starting optimized test with {total_questions} questions in batches of {self.batch_size}")
+        self.logger.info(f"Starting optimized test with {total_questions} questions")
         
-        for i in range(0, total_questions, self.batch_size):
-            batch_questions = questions[i:i + self.batch_size]
-            batch_answers = answers[i:i + self.batch_size]
-            batch_num = i // self.batch_size + 1
-            total_batches = (total_questions + self.batch_size - 1) // self.batch_size
-            
-            self.logger.info(f"Processing batch {batch_num}/{total_batches}")
+        for i, (question_data, correct_answer) in enumerate(zip(questions, answers)):
+            question_num = i + 1
             
             if progress_callback:
-                progress_callback(i, total_questions, f"Processing batch {batch_num}/{total_batches}")
+                progress_callback(i, total_questions, f"Processing question {question_num}/{total_questions}")
             
-            # Process batch in parallel
-            batch_start_time = time.time()
-            batch_results = self._process_question_batch(batch_questions, batch_answers, i)
-            batch_end_time = time.time()
-            
-            self.logger.info(f"Batch {batch_num} completed in {batch_end_time - batch_start_time:.2f} seconds")
+            # Process single question
+            result = self._process_single_question(agent, question_data, correct_answer, question_num)
             
             # Update results
-            for result in batch_results:
-                if result['is_correct']:
-                    self.results['correct_answers'] += 1
-                self.results['questions_answered'] += 1
+            if result['is_correct']:
+                self.results['correct_answers'] += 1
+            self.results['questions_answered'] += 1
             
-            processed_results.extend(batch_results)
+            processed_results.append(result)
             
-            # Add delay between batches to respect rate limits
-            if i + self.batch_size < total_questions:
-                self.logger.info(f"Waiting {self.inter_batch_delay} seconds before next batch...")
-                time.sleep(self.inter_batch_delay)
+            # Add delay between questions to respect rate limits
+            if i < total_questions - 1:  # Don't delay after last question
+                self.logger.info(f"Waiting 1 second before next question...")
+                time.sleep(1)
         
         self.results['detailed_results'] = processed_results
         
@@ -547,42 +503,14 @@ Format: A. [your reasoning here]"""
         return agent_answer.strip().upper() == correct_answer.strip().upper()
     
     def run_test_with_extracted_data(self, questions: List[Dict], answers: List[str], progress_callback=None):
-        """Run test using pre-extracted questions and answers with optimization"""
-        self.results['test_start_time'] = datetime.now()
-        
-        # Validate input data
-        if not questions:
-            self.logger.error("No questions provided")
-            raise ValueError("No questions provided")
-        
-        if not answers:
-            self.logger.error("No answers provided")
-            raise ValueError("No answers provided")
-        
-        # Ensure all questions have question_number field
-        for i, question in enumerate(questions):
-            if 'question_number' not in question:
-                question['question_number'] = i + 1
-        
-        # Log extracted data info instead of using Streamlit
-        self.logger.info(f"Using extracted data: {len(questions)} questions and {len(answers)} answers")
-        
-        # Ensure questions and answers match in count
-        if len(questions) != len(answers):
-            self.logger.warning(f"Mismatch in extracted data: {len(questions)} questions vs {len(answers)} answers")
-            # Use the minimum to avoid index errors
-            min_count = min(len(questions), len(answers))
-            questions = questions[:min_count]
-            answers = answers[:min_count]
-        
-        # Use optimized processing
-        return self.run_test_optimized(questions, answers, progress_callback)
+        """Run test using pre-extracted questions and answers"""
+        return self.run_test_simplified(questions, answers, progress_callback)
 
     def run_test_with_cached_data(self, progress_callback=None):
-        """Run test using already extracted and cached data (JSON caching only)"""
+        """Run test using cached data"""
         self.results['test_start_time'] = datetime.now()
         
-        # Look for existing cached data files in the new location
+        # Look for existing cached data files
         cached_data_path = Path("Outputs/extraction")
         
         if not cached_data_path.exists():
@@ -597,8 +525,8 @@ Format: A. [your reasoning here]"""
             with open(cached_data_path / "answers.json", 'r') as f:
                 answers = json.load(f)
                 
-            # Use the optimized method
-            return self.run_test_optimized(questions, answers, progress_callback)
+            # Use the simplified method
+            return self.run_test_simplified(questions, answers, progress_callback)
             
         except Exception as e:
             self.logger.error(f"Error loading cached data: {e}")

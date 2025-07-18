@@ -181,26 +181,6 @@ def create_test_optimized_agent():
         return None
 
 # ───────────────────────────────────────────────
-# AGENT POOL FOR PARALLEL PROCESSING
-# ───────────────────────────────────────────────
-def create_agent_pool(pool_size: int = 3):
-    """Create a pool of agents for parallel processing"""
-    logger.info(f"Creating agent pool with {pool_size} agents...")
-    
-    agent_pool = []
-    for i in range(pool_size):
-        try:
-            agent = create_test_optimized_agent()
-            if agent:
-                agent_pool.append(agent)
-                logger.info(f"Agent {i+1}/{pool_size} created successfully")
-        except Exception as e:
-            logger.error(f"Failed to create agent {i+1}: {e}")
-    
-    logger.info(f"Agent pool created with {len(agent_pool)} agents")
-    return agent_pool
-
-# ───────────────────────────────────────────────
 # LITELLM WRAPPER WITHOUT CACHING
 # ───────────────────────────────────────────────
 class LiteLLMWrapper:
@@ -768,7 +748,7 @@ def practice_test_interface():
                 logger.error("Agent failed to initialize for test execution")
                 return
             
-            # Create a single progress bar and status text outside the test execution
+            # Create a single progress bar and status text
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -779,29 +759,28 @@ def practice_test_interface():
                 status_text.text(f"Progress: {current}/{total} - {message}")
                 logger.info(f"Test progress: {current}/{total} - {message}")
             
-            # Run automated test
+            # Run automated test with single agent
             with st.spinner("🔄 Running automated test..."):
                 try:
                     from scripts.test_runner import AutomatedTestRunner
                     
+                    # Simplified agent config
                     agent_config = {
                         'model': os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
-                        'tools': ['knowledge_base_retriever', 'web_search'] if use_knowledge_base and use_web_search else ['web_search'],
                         'temperature': temperature,
                         'timeout': 3600
                     }
                     
-                    logger.info(f"Created agent config: {agent_config}")
+                    logger.info(f"Created simplified agent config: {agent_config}")
                     
                     runner = AutomatedTestRunner(agent_config)
                     
-                    # Use cached data if available, otherwise run full test
+                    # Use cached data if available, otherwise run with extracted data
                     if skip_extraction:
                         logger.info("Running test with cached data")
                         results = runner.run_test_with_cached_data(progress_callback=progress_callback)
                     else:
                         logger.info("Running test with extracted data")
-                        # Use the extracted data from step 1
                         extraction_results = st.session_state.test_workflow_state['extraction_results']
                         results = runner.run_test_with_extracted_data(
                             extraction_results['questions'],
