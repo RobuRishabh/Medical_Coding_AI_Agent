@@ -22,7 +22,7 @@ class ResultsGenerator:
             - **Temperature**: {self.results['agent_config']['temperature']}
 
             ## Infrastructure Details
-            - **Framework**: SmolaGents CodeAgent
+            - **Framework**: SmolaGents ToolCallingAgent
             - **Vector Database**: ChromaDB with HuggingFace Embeddings
             - **Web Search**: DuckDuckGo
             - **Knowledge Base**: Embedded PDF documents
