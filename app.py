@@ -581,6 +581,7 @@ def practice_test_interface():
                     else:
                         logger.info("Running test with extracted data")
                         extraction_results = st.session_state.test_workflow_state['extraction_results']
+                        # This will now use simplified processing with individual reasoning
                         results = runner.run_test_with_extracted_data(
                             extraction_results['questions'],
                             extraction_results['answers'],
@@ -607,6 +608,16 @@ def practice_test_interface():
                         logger.error("Test runner returned None results")
                         return
                     
+                    # Add defensive checks for required keys
+                    required_keys = ['score_percentage', 'questions_answered', 'correct_answers']
+                    missing_keys = [key for key in required_keys if key not in results]
+                    
+                    if missing_keys:
+                        logger.error(f"Missing required keys in results: {missing_keys}")
+                        logger.error(f"Available keys: {list(results.keys()) if isinstance(results, dict) else 'Not a dict'}")
+                        st.error(f"❌ Results missing required data: {missing_keys}")
+                        return
+                    
                     # Clear the progress bar and status text after completion
                     progress_bar.empty()
                     status_text.empty()
@@ -614,9 +625,10 @@ def practice_test_interface():
                     # Mark test as completed
                     st.session_state.test_workflow_state['test_completed'] = True
                     
-                    # Display results
-                    st.success(f"🎉 Test completed! Score: {results['score_percentage']:.1f}%")
-                    logger.info(f"Test completed with score: {results['score_percentage']:.1f}%")
+                    # Display results with safe access
+                    score = results.get('score_percentage', 0)
+                    st.success(f"🎉 Test completed! Score: {score:.1f}%")
+                    logger.info(f"Test completed with score: {score:.1f}%")
                     
                     # Display detailed results
                     st.subheader("📊 Test Results Summary")
@@ -631,6 +643,24 @@ def practice_test_interface():
                     
                     # Generate and display report
                     from scripts.results_generator import ResultsGenerator
+                    
+                    # Add missing keys to results before generating report
+                    if 'agent_config' not in results:
+                        results['agent_config'] = {}
+                    
+                    if 'tools' not in results['agent_config']:
+                        # Reconstruct tools info based on what was used
+                        tools_used = []
+                        if use_knowledge_base:
+                            tools_used.append('knowledge_base_retriever')
+                        if use_web_search:
+                            tools_used.append('web_search_tool')
+                        results['agent_config']['tools'] = tools_used
+                    
+                    # Ensure other required agent_config keys exist
+                    results['agent_config']['model'] = results['agent_config'].get('model', os.getenv("AGENT_MODEL", "gpt-3.5-turbo"))
+                    results['agent_config']['temperature'] = results['agent_config'].get('temperature', temperature)
+                    
                     generator = ResultsGenerator(results)
                     report = generator.generate_comprehensive_report()
                     
@@ -662,7 +692,40 @@ def practice_test_interface():
                     st.info("Please run the test with PDFs first to generate cached data.")
                 except Exception as e:
                     logger.error(f"Error running test: {e}")
+                    logger.error(f"Exception type: {type(e).__name__}")
+                    logger.error(f"Exception args: {e.args}")
+                    
+                    # Add stack trace for debugging
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
+                    
+                    # Check what we have in results if it exists
+                    if 'results' in locals():
+                        logger.error(f"Results variable exists: {results is not None}")
+                        if results is not None:
+                            logger.error(f"Results type: {type(results)}")
+                            if isinstance(results, dict):
+                                logger.error(f"Results keys: {list(results.keys())}")
+                            else:
+                                logger.error(f"Results content: {str(results)[:500]}")
+                    else:
+                        logger.error("Results variable does not exist in locals()")
+                    
+                    # Enhanced error display
                     st.error(f"❌ Error running test: {str(e)}")
+                    st.error(f"Exception type: {type(e).__name__}")
+                    
+                    # Show more debugging info in UI
+                    with st.expander("🐛 Debug Information"):
+                        st.code(f"Exception: {e}")
+                        st.code(f"Exception type: {type(e).__name__}")
+                        st.code(f"Exception args: {e.args}")
+                        if 'results' in locals() and results is not None:
+                            if isinstance(results, dict):
+                                st.code(f"Available result keys: {list(results.keys())}")
+                            st.code(f"Results content: {str(results)[:1000]}")
+                        st.code(traceback.format_exc())
+                    
                     st.info("Please check the logs for more details.")
     
     # Step 3: Results and New Test Option

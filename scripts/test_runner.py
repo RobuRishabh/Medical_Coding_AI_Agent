@@ -502,12 +502,151 @@ Format: A. [your reasoning here]"""
         """Score individual answer"""
         return agent_answer.strip().upper() == correct_answer.strip().upper()
     
+    def run_test_batch_processing(self, questions: List[Dict], answers: List[str], 
+                                progress_callback=None) -> Dict:
+        """Run test with batch processing - all questions at once"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Validate input
+        if not questions or not answers:
+            raise ValueError("Questions and answers cannot be empty")
+        
+        # Create single agent
+        agent = self._create_single_agent()
+        if not agent:
+            raise Exception("Failed to create agent")
+        
+        total_questions = len(questions)
+        self.logger.info(f"Starting batch test with {total_questions} questions")
+        
+        if progress_callback:
+            progress_callback(0, total_questions, "Preparing batch request...")
+        
+        try:
+            # Format all questions for batch processing
+            batch_question = self._format_all_questions_for_batch(questions)
+            
+            if progress_callback:
+                progress_callback(total_questions//4, total_questions, "Sending batch request to agent...")
+            
+            # Get agent response for all questions at once
+            response = agent.run(batch_question)
+            full_response = str(response)
+            
+            if progress_callback:
+                progress_callback(total_questions//2, total_questions, "Processing agent response...")
+            
+            # Extract all answers from the batch response
+            agent_answers = self._extract_batch_answers(full_response, total_questions)
+            
+            if progress_callback:
+                progress_callback(3*total_questions//4, total_questions, "Scoring answers...")
+            
+            # Score all answers
+            for i, (question_data, correct_answer, agent_answer) in enumerate(zip(questions, answers, agent_answers)):
+                question_num = i + 1
+                is_correct = self._score_answer(agent_answer, correct_answer)
+                
+                if is_correct:
+                    self.results['correct_answers'] += 1
+                self.results['questions_answered'] += 1
+                
+                self.results['detailed_results'].append({
+                    'question_number': question_num,
+                    'question': question_data['question'],
+                    'options': question_data.get('options', []),
+                    'agent_answer': agent_answer,
+                    'correct_answer': correct_answer,
+                    'is_correct': is_correct,
+                    'reasoning': 'Batch processing - no individual reasoning'
+                })
+            
+            if progress_callback:
+                progress_callback(total_questions, total_questions, "Batch processing completed!")
+            
+        except Exception as e:
+            self.logger.error(f"Error in batch processing: {e}")
+            # Fallback to individual processing if batch fails
+            self.logger.info("Falling back to individual question processing...")
+            return self.run_test_simplified(questions, answers, progress_callback)
+        
+        # Calculate final score
+        if self.results['questions_answered'] > 0:
+            self.results['score_percentage'] = (
+                self.results['correct_answers'] / self.results['questions_answered'] * 100
+            )
+        
+        self.results['test_end_time'] = datetime.now()
+        return self.results
+
+    def _format_all_questions_for_batch(self, questions: List[Dict]) -> str:
+        """Format all questions for batch processing"""
+        formatted = "Medical Coding Practice Test - Answer ALL questions:\n\n"
+        
+        for i, question_data in enumerate(questions, 1):
+            formatted += f"Question {i}:\n"
+            formatted += f"{question_data['question']}\n"
+            
+            if question_data.get('options'):
+                for option in question_data['options']:
+                    formatted += f"{option}\n"
+            formatted += "\n"
+        
+        # Add the batch processing prompt
+        formatted += f"\n{self.practice_test_prompt}"
+        
+        return formatted
+
+    def _extract_batch_answers(self, response: str, expected_count: int) -> List[str]:
+        """Extract answers from batch response"""
+        self.logger.info("Extracting batch answers from response")
+        
+        # Look for the ANSWERS section
+        answers_section = ""
+        if "**ANSWERS:**" in response:
+            answers_section = response.split("**ANSWERS:**")[1]
+        elif "ANSWERS:" in response:
+            answers_section = response.split("ANSWERS:")[1]
+        else:
+            # Fallback: look for numbered answers in the entire response
+            answers_section = response
+        
+        # Extract answers using multiple patterns
+        patterns = [
+            r'(\d+)\.\s*([A-D])',  # "1. A"
+            r'(\d+)\)\s*([A-D])',  # "1) A"
+            r'(\d+):\s*([A-D])',   # "1: A"
+            r'(\d+)\s+([A-D])',    # "1 A"
+        ]
+        
+        answer_dict = {}
+        for pattern in patterns:
+            matches = re.findall(pattern, answers_section, re.IGNORECASE)
+            for match in matches:
+                question_num = int(match[0])
+                answer_letter = match[1].upper()
+                if question_num <= expected_count:
+                    answer_dict[question_num] = answer_letter
+        
+        # Convert to ordered list
+        answers = []
+        for i in range(1, expected_count + 1):
+            if i in answer_dict:
+                answers.append(answer_dict[i])
+            else:
+                self.logger.warning(f"Missing answer for question {i}, using 'A'")
+                answers.append('A')  # Default fallback
+        
+        self.logger.info(f"Extracted {len(answers)} answers from batch response")
+        return answers
+
+    # Update the main methods to use batch processing
     def run_test_with_extracted_data(self, questions: List[Dict], answers: List[str], progress_callback=None):
-        """Run test using pre-extracted questions and answers"""
-        return self.run_test_simplified(questions, answers, progress_callback)
+        """Run test using pre-extracted questions and answers with batch processing"""
+        return self.run_test_batch_processing(questions, answers, progress_callback)
 
     def run_test_with_cached_data(self, progress_callback=None):
-        """Run test using cached data"""
+        """Run test using cached data with batch processing"""
         self.results['test_start_time'] = datetime.now()
         
         # Look for existing cached data files
@@ -525,8 +664,8 @@ Format: A. [your reasoning here]"""
             with open(cached_data_path / "answers.json", 'r') as f:
                 answers = json.load(f)
                 
-            # Use the simplified method
-            return self.run_test_simplified(questions, answers, progress_callback)
+            # Use the batch processing method
+            return self.run_test_batch_processing(questions, answers, progress_callback)
             
         except Exception as e:
             self.logger.error(f"Error loading cached data: {e}")
