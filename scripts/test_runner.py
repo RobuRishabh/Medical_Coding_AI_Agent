@@ -640,6 +640,335 @@ Format: A. [your reasoning here]"""
         self.logger.info(f"Extracted {len(answers)} answers from batch response")
         return answers
 
+    def run_test_parallel_batch(self, questions: List[Dict], answers: List[str], 
+                           progress_callback=None) -> Dict:
+        """Run test with parallel batch processing - all questions at once"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Validate input
+        if not questions or not answers:
+            raise ValueError("Questions and answers cannot be empty")
+        
+        # Create single agent
+        agent = self._create_single_agent()
+        if not agent:
+            raise Exception("Failed to create agent")
+        
+        total_questions = len(questions)
+        self.logger.info(f"Starting parallel batch test with {total_questions} questions")
+        
+        if progress_callback:
+            progress_callback(0, total_questions, "Preparing parallel batch request...")
+        
+        try:
+            # Process all questions in one batch with retry mechanism
+            agent_answers = self._process_all_questions_with_retry(agent, questions, progress_callback)
+            
+            if progress_callback:
+                progress_callback(3*total_questions//4, total_questions, "Scoring all answers...")
+            
+            # Score all answers
+            for i, (question_data, correct_answer, agent_answer) in enumerate(zip(questions, answers, agent_answers)):
+                question_num = i + 1
+                is_correct = self._score_answer(agent_answer, correct_answer)
+                
+                if is_correct:
+                    self.results['correct_answers'] += 1
+                self.results['questions_answered'] += 1
+                
+                self.results['detailed_results'].append({
+                    'question_number': question_num,
+                    'question': question_data['question'],
+                    'options': question_data.get('options', []),
+                    'agent_answer': agent_answer,
+                    'correct_answer': correct_answer,
+                    'is_correct': is_correct,
+                    'reasoning': 'Parallel batch processing - unified reasoning'
+                })
+            
+            if progress_callback:
+                progress_callback(total_questions, total_questions, "Parallel batch processing completed!")
+        
+        except Exception as e:
+            self.logger.error(f"Error in parallel batch processing: {e}")
+            raise e  # Don't fallback, let the error propagate
+        
+        # Calculate final score
+        if self.results['questions_answered'] > 0:
+            self.results['score_percentage'] = (
+                self.results['correct_answers'] / self.results['questions_answered'] * 100
+            )
+        
+        self.results['test_end_time'] = datetime.now()
+        return self.results
+
+    def _process_all_questions_with_retry(self, agent, questions: List[Dict], progress_callback=None) -> List[str]:
+        """Process all questions with retry mechanism using different tool strategies"""
+        max_retries = 3
+        
+        # Different tool strategies for retries
+        tool_strategies = [
+            ['knowledge_base_retriever', 'web_search_tool'],  # Original - both tools
+            ['web_search_tool'],  # Web search only
+            ['knowledge_base_retriever'],  # Knowledge base only
+            []  # No tools, model knowledge only
+        ]
+        
+        for attempt in range(max_retries):
+            try:
+                if progress_callback:
+                    progress_callback(
+                        attempt * len(questions) // max_retries, 
+                        len(questions), 
+                        f"Attempt {attempt + 1}/{max_retries}: Processing all {len(questions)} questions..."
+                    )
+                
+                # Use current agent or create new one with different strategy
+                current_agent = agent
+                if attempt > 0:
+                    strategy = tool_strategies[min(attempt, len(tool_strategies) - 1)]
+                    current_agent = self._create_agent_with_strategy(strategy)
+                    self.logger.info(f"Retry attempt {attempt + 1} using tools: {strategy}")
+                
+                # Format all questions for batch processing
+                batch_prompt = self._format_all_questions_for_parallel_batch(questions)
+                
+                # Get agent response for all questions at once
+                response = current_agent.run(batch_prompt)
+                full_response = str(response)
+                
+                # Extract all answers from the batch response
+                agent_answers = self._extract_all_answers_with_validation(full_response, len(questions))
+                
+                # Validate that we have all answers
+                missing_answers = [i+1 for i, answer in enumerate(agent_answers) if not answer or answer.strip() == '']
+                
+                if not missing_answers:
+                    self.logger.info(f"Successfully extracted all {len(agent_answers)} answers on attempt {attempt + 1}")
+                    return agent_answers
+                else:
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Attempt {attempt + 1}: Missing answers for questions {missing_answers[:10]}{'...' if len(missing_answers) > 10 else ''}. Retrying...")
+                        continue
+                    else:
+                        raise ValueError(f"Failed to extract answers for {len(missing_answers)} questions after {max_retries} attempts: {missing_answers[:20]}")
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Attempt {attempt + 1} failed with error: {e}. Retrying...")
+                    continue
+                else:
+                    raise ValueError(f"All {max_retries} attempts failed. Last error: {e}")
+        
+        raise ValueError("Unexpected end of retry loop")
+
+    def _create_agent_with_strategy(self, tool_names: List[str]):
+        """Create agent with specific tool strategy"""
+        sys.path.append(str(Path(__file__).parent.parent))
+        
+        try:
+            # Import tools
+            from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool
+            from smolagents import ToolCallingAgent, LiteLLMModel
+            import os
+            
+            # Map tool names to actual tools
+            tool_map = {
+                'knowledge_base_retriever': knowledge_base_retriever,
+                'web_search_tool': web_search_tool
+            }
+            
+            # Select tools based on strategy
+            selected_tools = [tool_map[name] for name in tool_names if name in tool_map]
+            
+            # Load test prompt
+            with open("prompts.json", encoding="utf-8") as f:
+                test_prompt = json.load(f).get("PRACTICE_TEST_PROMPT", "You are a medical coding expert.")
+            
+            # Create prompt templates
+            prompt_templates = {
+                "system_prompt": test_prompt,
+                "planning": {
+                    "initial_plan": "",
+                    "update_plan_pre_messages": "",
+                    "update_plan_post_messages": "",
+                },
+                "managed_agent": {
+                    "task": "",
+                    "report": "",
+                },
+                "final_answer": {
+                    "pre_messages": "",
+                    "post_messages": "",
+                },
+            }
+            
+            # Create LLM
+            llm = LiteLLMModel(
+                model_id=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+            
+            # Create agent
+            agent = ToolCallingAgent(
+                tools=selected_tools,
+                model=llm,
+                max_steps=2,
+                planning_interval=None,
+                prompt_templates=prompt_templates
+            )
+            
+            self.logger.info(f"Created agent with tools: {tool_names}")
+            return agent
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create agent with strategy {tool_names}: {e}")
+            return self.agent  # Fallback to original agent
+
+    def _format_all_questions_for_parallel_batch(self, questions: List[Dict]) -> str:
+        """Format all questions for parallel batch processing with strict answer format"""
+        formatted = """Medical Coding Practice Test - ANSWER ALL QUESTIONS IN ONE RESPONSE
+
+CRITICAL INSTRUCTIONS:
+1. You MUST answer ALL questions
+2. Provide answers in the exact format shown below
+3. Do NOT skip any questions
+4. Use only A, B, C, or D as answers
+
+"""
+    
+        # Add all questions
+        for i, question_data in enumerate(questions, 1):
+            formatted += f"Question {i}:\n"
+            formatted += f"{question_data['question']}\n"
+            
+            if question_data.get('options'):
+                for option in question_data['options']:
+                    formatted += f"{option}\n"
+            formatted += "\n"
+        
+        # Add strict formatting instructions
+        formatted += """
+REQUIRED ANSWER FORMAT - You MUST follow this exact format:
+
+**ANSWERS:**
+1. A
+2. B
+3. C
+4. D
+5. A
+... (continue for all questions)
+
+IMPORTANT:
+- Start your answer section with exactly "**ANSWERS:**"
+- Number each answer (1. 2. 3. etc.)
+- Provide only the letter (A, B, C, or D)
+- Answer every single question
+- Do not include explanations in the answer section
+
+Begin answering now:
+"""
+    
+        return formatted
+
+    def _extract_all_answers_with_validation(self, response: str, expected_count: int) -> List[str]:
+        """Extract all answers from batch response with strict validation"""
+        self.logger.info(f"Extracting {expected_count} answers from batch response")
+        
+        # Look for the ANSWERS section with multiple possible markers
+        answers_section = ""
+        answer_markers = ["**ANSWERS:**", "ANSWERS:", "**ANSWERS**", "ANSWER:", "**ANSWER:**"]
+        
+        for marker in answer_markers:
+            if marker in response:
+                answers_section = response.split(marker)[1]
+                self.logger.info(f"Found answers section using marker: {marker}")
+                break
+    
+        if not answers_section:
+            # Fallback: use entire response
+            answers_section = response
+            self.logger.warning("No answer section marker found, using entire response")
+        
+        # Extract answers using multiple patterns
+        patterns = [
+            r'(\d+)\.\s*([A-D])\b',  # "1. A"
+            r'(\d+)\)\s*([A-D])\b',  # "1) A"
+            r'(\d+):\s*([A-D])\b',   # "1: A"
+            r'(\d+)\s+([A-D])\b',    # "1 A"
+            r'Q(\d+):\s*([A-D])\b',  # "Q1: A"
+            r'Question\s+(\d+):\s*([A-D])\b',  # "Question 1: A"
+        ]
+        
+        answer_dict = {}
+        total_matches = 0
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, answers_section, re.IGNORECASE)
+            for match in matches:
+                question_num = int(match[0])
+                answer_letter = match[1].upper()
+                if 1 <= question_num <= expected_count:
+                    if question_num not in answer_dict:  # Don't overwrite existing answers
+                        answer_dict[question_num] = answer_letter
+                        total_matches += 1
+        
+        self.logger.info(f"Extracted {len(answer_dict)} unique answers using pattern matching")
+        
+        # If we don't have enough answers, try alternative extraction
+        if len(answer_dict) < expected_count:
+            self.logger.warning(f"Only found {len(answer_dict)} answers, trying alternative extraction...")
+            
+            # Try to find isolated letters A, B, C, D in sequence
+            lines = answers_section.split('\n')
+            letter_sequence = []
+            
+            for line in lines:
+                line = line.strip()
+                # Look for lines that contain only a single letter A-D (possibly with numbers/punctuation)
+                if re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE):
+                    match = re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE)
+                    letter_sequence.append(match.group(1).upper())
+            
+            # Fill in missing answers from letter sequence
+            sequence_index = 0
+            for i in range(1, expected_count + 1):
+                if i not in answer_dict and sequence_index < len(letter_sequence):
+                    answer_dict[i] = letter_sequence[sequence_index]
+                    sequence_index += 1
+        
+        # Convert to ordered list
+        answers = []
+        missing_questions = []
+        
+        for i in range(1, expected_count + 1):
+            if i in answer_dict:
+                answers.append(answer_dict[i])
+            else:
+                answers.append('')  # Empty string instead of fallback
+                missing_questions.append(i)
+        
+        # Log extraction results
+        if missing_questions:
+            self.logger.error(f"Missing answers for questions: {missing_questions[:20]}{'...' if len(missing_questions) > 20 else ''}")
+        else:
+            self.logger.info("Successfully extracted all answers")
+        
+        # Log answer distribution for validation
+        if answers:
+            from collections import Counter
+            answer_counts = Counter([a for a in answers if a])
+            self.logger.info(f"Answer distribution: {dict(answer_counts)}")
+            
+            # Check for suspicious patterns
+            total_valid = sum(answer_counts.values())
+            if total_valid > 0:
+                max_percentage = max(answer_counts.values()) / total_valid * 100
+                if max_percentage > 60:
+                    self.logger.warning(f"Suspicious answer distribution: {max_percentage:.1f}% of answers are the same")
+        
+        return answers
+
     # Update the main methods to use batch processing
     def run_test_with_extracted_data(self, questions: List[Dict], answers: List[str], progress_callback=None):
         """Run test using pre-extracted questions and answers with batch processing"""
@@ -670,3 +999,188 @@ Format: A. [your reasoning here]"""
         except Exception as e:
             self.logger.error(f"Error loading cached data: {e}")
             raise Exception(f"Failed to load cached test data: {e}")
+
+    def run_test_parallel_batch(self, questions: List[Dict], answers: List[str], 
+                           progress_callback=None) -> Dict:
+        """Run test with parallel batch processing - all questions at once"""
+        self.results['test_start_time'] = datetime.now()
+        
+        # Validate input
+        if not questions or not answers:
+            raise ValueError("Questions and answers cannot be empty")
+        
+        # Create single agent
+        agent = self._create_single_agent()
+        if not agent:
+            raise Exception("Failed to create agent")
+        
+        total_questions = len(questions)
+        self.logger.info(f"Starting parallel batch test with {total_questions} questions")
+        
+        if progress_callback:
+            progress_callback(0, total_questions, "Preparing parallel batch request...")
+        
+        try:
+            # Process all questions in one batch with retry mechanism
+            agent_answers = self._process_all_questions_with_retry(agent, questions, progress_callback)
+            
+            if progress_callback:
+                progress_callback(3*total_questions//4, total_questions, "Scoring all answers...")
+            
+            # Score all answers
+            for i, (question_data, correct_answer, agent_answer) in enumerate(zip(questions, answers, agent_answers)):
+                question_num = i + 1
+                is_correct = self._score_answer(agent_answer, correct_answer)
+                
+                if is_correct:
+                    self.results['correct_answers'] += 1
+                self.results['questions_answered'] += 1
+                
+                self.results['detailed_results'].append({
+                    'question_number': question_num,
+                    'question': question_data['question'],
+                    'options': question_data.get('options', []),
+                    'agent_answer': agent_answer,
+                    'correct_answer': correct_answer,
+                    'is_correct': is_correct,
+                    'reasoning': 'Parallel batch processing - unified reasoning'
+                })
+            
+            if progress_callback:
+                progress_callback(total_questions, total_questions, "Parallel batch processing completed!")
+        
+        except Exception as e:
+            self.logger.error(f"Error in parallel batch processing: {e}")
+            raise e  # Don't fallback, let the error propagate
+        
+        # Calculate final score
+        if self.results['questions_answered'] > 0:
+            self.results['score_percentage'] = (
+                self.results['correct_answers'] / self.results['questions_answered'] * 100
+            )
+        
+        self.results['test_end_time'] = datetime.now()
+        return self.results
+
+    def _process_all_questions_with_retry(self, agent, questions: List[Dict], progress_callback=None) -> List[str]:
+        """Process all questions with retry mechanism using different tool strategies"""
+        max_retries = 3
+        
+        # Different tool strategies for retries
+        tool_strategies = [
+            ['knowledge_base_retriever', 'web_search_tool'],  # Original - both tools
+            ['web_search_tool'],  # Web search only
+            ['knowledge_base_retriever'],  # Knowledge base only
+            []  # No tools, model knowledge only
+        ]
+        
+        for attempt in range(max_retries):
+            try:
+                if progress_callback:
+                    progress_callback(
+                        attempt * len(questions) // max_retries, 
+                        len(questions), 
+                        f"Attempt {attempt + 1}/{max_retries}: Processing all {len(questions)} questions..."
+                    )
+                
+                # Use current agent or create new one with different strategy
+                current_agent = agent
+                if attempt > 0:
+                    strategy = tool_strategies[min(attempt, len(tool_strategies) - 1)]
+                    current_agent = self._create_agent_with_strategy(strategy)
+                    self.logger.info(f"Retry attempt {attempt + 1} using tools: {strategy}")
+                
+                # Format all questions for batch processing
+                batch_prompt = self._format_all_questions_for_parallel_batch(questions)
+                
+                # Get agent response for all questions at once
+                response = current_agent.run(batch_prompt)
+                full_response = str(response)
+                
+                # Extract all answers from the batch response
+                agent_answers = self._extract_all_answers_with_validation(full_response, len(questions))
+                
+                # Validate that we have all answers
+                missing_answers = [i+1 for i, answer in enumerate(agent_answers) if not answer or answer.strip() == '']
+                
+                if not missing_answers:
+                    self.logger.info(f"Successfully extracted all {len(agent_answers)} answers on attempt {attempt + 1}")
+                    return agent_answers
+                else:
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Attempt {attempt + 1}: Missing answers for questions {missing_answers[:10]}{'...' if len(missing_answers) > 10 else ''}. Retrying...")
+                        continue
+                    else:
+                        raise ValueError(f"Failed to extract answers for {len(missing_answers)} questions after {max_retries} attempts: {missing_answers[:20]}")
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Attempt {attempt + 1} failed with error: {e}. Retrying...")
+                    continue
+                else:
+                    raise ValueError(f"All {max_retries} attempts failed. Last error: {e}")
+        
+        raise ValueError("Unexpected end of retry loop")
+
+    def _create_agent_with_strategy(self, tool_names: List[str]):
+        """Create agent with specific tool strategy"""
+        sys.path.append(str(Path(__file__).parent.parent))
+        
+        try:
+            # Import tools
+            from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool
+            from smolagents import ToolCallingAgent, LiteLLMModel
+            import os
+            
+            # Map tool names to actual tools
+            tool_map = {
+                'knowledge_base_retriever': knowledge_base_retriever,
+                'web_search_tool': web_search_tool
+            }
+            
+            # Select tools based on strategy
+            selected_tools = [tool_map[name] for name in tool_names if name in tool_map]
+            
+            # Load test prompt
+            with open("prompts.json", encoding="utf-8") as f:
+                test_prompt = json.load(f).get("PRACTICE_TEST_PROMPT", "You are a medical coding expert.")
+            
+            # Create prompt templates
+            prompt_templates = {
+                "system_prompt": test_prompt,
+                "planning": {
+                    "initial_plan": "",
+                    "update_plan_pre_messages": "",
+                    "update_plan_post_messages": "",
+                },
+                "managed_agent": {
+                    "task": "",
+                    "report": "",
+                },
+                "final_answer": {
+                    "pre_messages": "",
+                    "post_messages": "",
+                },
+            }
+            
+            # Create LLM
+            llm = LiteLLMModel(
+                model_id=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+            
+            # Create agent
+            agent = ToolCallingAgent(
+                tools=selected_tools,
+                model=llm,
+                max_steps=2,
+                planning_interval=None,
+                prompt_templates=prompt_templates
+            )
+            
+            self.logger.info(f"Created agent with tools: {tool_names}")
+            return agent
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create agent with strategy {tool_names}: {e}")
+            return self.agent  # Fallback to original agent
