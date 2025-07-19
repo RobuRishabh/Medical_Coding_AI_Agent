@@ -393,8 +393,7 @@ class TestProcessor:
         
         first_option = options[0]
         
-        # Try to split option A intelligently
-        option_text = first_option[2:].strip()  # Remove "A. "
+        option_text = first_option[2:].strip()  
         
         # Look for question indicators
         question_indicators = ['Which CPT code', 'What CPT code', 'Which ICD', 'What ICD', 'Which HCPCS']

@@ -26,14 +26,14 @@ def chunk_documents(docs):
 def embed_and_store_chunks(chunks):
     # Use the updated HuggingFaceEmbeddings
     embedding_model = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"  # Faster, smaller model
+        model_name="sentence-transformers/all-MiniLM-L6-v2"  
     )
     
     # Convert Path to string for ChromaDB
     vector_db = Chroma.from_documents(
         documents=chunks,
         embedding=embedding_model,
-        persist_directory=str(VECTOR_DB_DIR)  # Convert to string
+        persist_directory=str(VECTOR_DB_DIR)  
     )
     vector_db.persist()
     print(f"Stored {len(chunks)} chunks in the vector database at {VECTOR_DB_DIR}")

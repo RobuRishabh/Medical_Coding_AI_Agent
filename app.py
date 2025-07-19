@@ -43,9 +43,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1000"
-os.environ["STREAMLIT_SERVER_MAX_MESSAGE_SIZE"] = "1000"
-os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 logger.info("Streamlit page config and environment variables set")
 
 # ─────────────────────────────
@@ -88,10 +85,11 @@ def create_fast_agent(use_knowledge_base=True, use_web_search=True):
             tool_names.append(web_search_tool.name)
         if use_knowledge_base:
             tool_names.append(knowledge_base_retriever.name)
+        
         try:
             enhanced_system_prompt = base_prompt.format(tool_names=tool_names)
         except Exception as e:
-            print(f"Error occurred while formatting prompt: {e}")
+            logger.warning(f"Error occurred while formatting prompt: {e}")
             enhanced_system_prompt = base_prompt  # fallback
 
         selected_tools = []
@@ -116,10 +114,16 @@ def create_fast_agent(use_knowledge_base=True, use_web_search=True):
                 "post_messages": "",
             },
         }
-        llm = LiteLLMModel(
-            model_id=os.getenv("AGENT_MODEL"),
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        
+        # Create LLM with error handling
+        try:
+            llm = LiteLLMModel(
+                model_id=os.getenv("AGENT_MODEL"),
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+        except Exception as e:
+            logger.error(f"Failed to create LiteLLM model: {e}")
+            raise
 
         agent = ToolCallingAgent(
             tools=selected_tools,
@@ -196,10 +200,14 @@ def initialize_base_agent():
 # ─────────────────────────────
 # UTILITIES (CITATIONS, ETC.)
 # ─────────────────────────────
-def extract_citations_from_response(response_text, agent):
+def extract_citations_from_response(response_text):
+    """Extract citations from response text using regex patterns"""
     citations = {'web_sources': [], 'knowledge_base_sources': []}
+    
     if "**Sources:**" in response_text:
         sources_section = response_text.split("**Sources:**")[1] if "**Sources:**" in response_text else ""
+        
+        # Extract web search citations
         web_pattern = r'- Web Search: \[([^\]]+)\]\(([^)]+)\)(.*)'
         web_matches = re.findall(web_pattern, sources_section)
         for match in web_matches:
@@ -208,6 +216,8 @@ def extract_citations_from_response(response_text, agent):
                 'url': match[1],
                 'description': match[2].strip(' -')
             })
+        
+        # Extract knowledge base citations
         kb_pattern = r'- Knowledge Base: ([^,]+), Section: "([^"]+)"(.*)'
         kb_matches = re.findall(kb_pattern, sources_section)
         for match in kb_matches:
@@ -216,11 +226,14 @@ def extract_citations_from_response(response_text, agent):
                 'section': match[1],
                 'description': match[2].strip(' -')
             })
+    
     return citations
 
 def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
     st.markdown("---")
-    st.subheader("🔧 Tools Used")
+    st.subheader("🔧 Tools Used & Sources")
+    
+    # Show tools configuration
     col_ref1, col_ref2 = st.columns(2)
     with col_ref1:
         if use_knowledge_base:
@@ -232,22 +245,92 @@ def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
             st.success("✅ Web Search Used")
         else:
             st.info("➖ Web Search Not Used")
+    
+    # Extract and display actual sources from response
+    citations = extract_citations_from_response(response_text)
+    
+    if citations['web_sources'] or citations['knowledge_base_sources']:
+        st.markdown("### 📚 Sources Found")
+        
+        # Display web sources
+        if citations['web_sources']:
+            st.markdown("#### 🌐 Web Sources:")
+            for source in citations['web_sources']:
+                with st.expander(f"🔗 {source['name']}"):
+                    st.write(f"**URL:** {source['url']}")
+                    if source['description']:
+                        st.write(f"**Description:** {source['description']}")
+        
+        # Display knowledge base sources
+        if citations['knowledge_base_sources']:
+            st.markdown("#### 📖 Knowledge Base Sources:")
+            for source in citations['knowledge_base_sources']:
+                with st.expander(f"📄 {source['document']}"):
+                    st.write(f"**Section:** {source['section']}")
+                    if source['description']:
+                        st.write(f"**Description:** {source['description']}")
+    else:
+        # Check if response contains any source indicators
+        if "**Sources:**" in response_text or "Sources:" in response_text:
+            st.info("📋 Sources mentioned in response but couldn't parse them automatically")
+            with st.expander("View raw sources section"):
+                # Try to extract the sources section manually
+                if "**Sources:**" in response_text:
+                    sources_section = response_text.split("**Sources:**")[1]
+                elif "Sources:" in response_text:
+                    sources_section = response_text.split("Sources:")[1]
+                else:
+                    sources_section = "Could not extract sources section"
+                st.code(sources_section)
+        else:
+            st.info("📋 No explicit sources found in response")
 
 def safe_extract_response(raw_response):
-    # Simple placeholder for actual extraction (adapt as needed)
-    if isinstance(raw_response, str):
-        return raw_response
-    elif hasattr(raw_response, 'content'):
-        return raw_response.content
-    elif isinstance(raw_response, dict) and 'content' in raw_response:
-        return raw_response['content']
-    elif isinstance(raw_response, dict) and 'choices' in raw_response:
-        # Standard OpenAI API style
-        return raw_response['choices'][0]['message']['content']
-    return str(raw_response)
+    """Safely extract response content with better error handling"""
+    try:
+        # Handle string responses
+        if isinstance(raw_response, str):
+            return raw_response
+        
+        # Handle dict responses (API format)
+        if isinstance(raw_response, dict):
+            if 'content' in raw_response:
+                return raw_response['content']
+            elif 'choices' in raw_response and len(raw_response['choices']) > 0:
+                choice = raw_response['choices'][0]
+                if isinstance(choice, dict) and 'message' in choice:
+                    return choice['message'].get('content', str(raw_response))
+                return str(choice)
+            return str(raw_response)
+        
+        # Handle objects with content attribute
+        if hasattr(raw_response, 'content'):
+            content = raw_response.content
+            return str(content) if content is not None else str(raw_response)
+        
+        # Handle message-like objects (LiteLLM responses)
+        if hasattr(raw_response, 'choices') and raw_response.choices:
+            try:
+                first_choice = raw_response.choices[0]
+                if hasattr(first_choice, 'message') and hasattr(first_choice.message, 'content'):
+                    content = first_choice.message.content
+                    return str(content) if content is not None else str(raw_response)
+            except (IndexError, AttributeError):
+                pass
+        
+        # Handle other response formats
+        if hasattr(raw_response, 'text'):
+            return str(raw_response.text)
+        
+        # Last resort - convert to string but log warning
+        logger.warning(f"Unknown response type: {type(raw_response)}, converting to string")
+        return str(raw_response)
+        
+    except Exception as e:
+        logger.error(f"Error extracting response: {e}, response type: {type(raw_response)}")
+        return str(raw_response)
 
 def clean_response_text(response_text):
-    # Any extra cleaning you want to do
     return response_text.strip()
 
 # ─────────────────────────────

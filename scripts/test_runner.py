@@ -9,9 +9,7 @@ from smolagents import CodeAgent
 from typing import Dict, List
 import re
 import os
-import concurrent.futures
 from functools import partial
-import threading
 
 class AutomatedTestRunner:
     def __init__(self, agent_config: Dict):
@@ -348,7 +346,7 @@ Format: A. [your reasoning here]"""
                         continue
                     else:
                         return 'A', f'Error occurred while generating response: {str(e)}'
-        
+    
         return 'A', 'Unable to generate reasoning due to multiple failures'
     
     def _extract_reasoning(self, response: str, answer: str) -> str:
@@ -805,7 +803,7 @@ Format: A. [your reasoning here]"""
             
             # Create LLM
             llm = LiteLLMModel(
-                model_id=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+                model_id=os.getenv("AGENT_MODEL", "gpt-4.1"),
                 api_key=os.getenv("OPENAI_API_KEY")
             )
             
@@ -875,6 +873,10 @@ Begin answering now:
         """Extract all answers from batch response with strict validation"""
         self.logger.info(f"Extracting {expected_count} answers from batch response")
         
+        # Ensure response is a string
+        if not isinstance(response, str):
+            response = str(response)
+        
         # Look for the ANSWERS section with multiple possible markers
         answers_section = ""
         answer_markers = ["**ANSWERS:**", "ANSWERS:", "**ANSWERS**", "ANSWER:", "**ANSWER:**"]
@@ -884,13 +886,13 @@ Begin answering now:
                 answers_section = response.split(marker)[1]
                 self.logger.info(f"Found answers section using marker: {marker}")
                 break
-    
+
         if not answers_section:
             # Fallback: use entire response
             answers_section = response
             self.logger.warning("No answer section marker found, using entire response")
         
-        # Extract answers using multiple patterns
+        # Extract answers using multiple patterns with better error handling
         patterns = [
             r'(\d+)\.\s*([A-D])\b',  # "1. A"
             r'(\d+)\)\s*([A-D])\b',  # "1) A"
@@ -903,15 +905,18 @@ Begin answering now:
         answer_dict = {}
         total_matches = 0
         
-        for pattern in patterns:
-            matches = re.findall(pattern, answers_section, re.IGNORECASE)
-            for match in matches:
-                question_num = int(match[0])
-                answer_letter = match[1].upper()
-                if 1 <= question_num <= expected_count:
-                    if question_num not in answer_dict:  # Don't overwrite existing answers
-                        answer_dict[question_num] = answer_letter
-                        total_matches += 1
+        try:
+            for pattern in patterns:
+                matches = re.findall(pattern, answers_section, re.IGNORECASE)
+                for match in matches:
+                    question_num = int(match[0])
+                    answer_letter = match[1].upper()
+                    if 1 <= question_num <= expected_count:
+                        if question_num not in answer_dict:  # Don't overwrite existing answers
+                            answer_dict[question_num] = answer_letter
+                            total_matches += 1
+        except Exception as e:
+            self.logger.error(f"Error in pattern matching: {e}")
         
         self.logger.info(f"Extracted {len(answer_dict)} unique answers using pattern matching")
         
@@ -919,25 +924,28 @@ Begin answering now:
         if len(answer_dict) < expected_count:
             self.logger.warning(f"Only found {len(answer_dict)} answers, trying alternative extraction...")
             
-            # Try to find isolated letters A, B, C, D in sequence
-            lines = answers_section.split('\n')
-            letter_sequence = []
-            
-            for line in lines:
-                line = line.strip()
-                # Look for lines that contain only a single letter A-D (possibly with numbers/punctuation)
-                if re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE):
-                    match = re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE)
-                    letter_sequence.append(match.group(1).upper())
-            
-            # Fill in missing answers from letter sequence
-            sequence_index = 0
-            for i in range(1, expected_count + 1):
-                if i not in answer_dict and sequence_index < len(letter_sequence):
-                    answer_dict[i] = letter_sequence[sequence_index]
-                    sequence_index += 1
+            try:
+                # Try to find isolated letters A, B, C, D in sequence
+                lines = answers_section.split('\n')
+                letter_sequence = []
+                
+                for line in lines:
+                    line = line.strip()
+                    # Look for lines that contain only a single letter A-D (possibly with numbers/punctuation)
+                    if re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE):
+                        match = re.match(r'^\s*\d*[.):\s]*([A-D])\s*$', line, re.IGNORECASE)
+                        letter_sequence.append(match.group(1).upper())
+                
+                # Fill in missing answers from letter sequence
+                sequence_index = 0
+                for i in range(1, expected_count + 1):
+                    if i not in answer_dict and sequence_index < len(letter_sequence):
+                        answer_dict[i] = letter_sequence[sequence_index]
+                        sequence_index += 1
+            except Exception as e:
+                self.logger.error(f"Error in alternative extraction: {e}")
         
-        # Convert to ordered list
+        # Convert to ordered list with better error handling
         answers = []
         missing_questions = []
         
@@ -956,16 +964,19 @@ Begin answering now:
         
         # Log answer distribution for validation
         if answers:
-            from collections import Counter
-            answer_counts = Counter([a for a in answers if a])
-            self.logger.info(f"Answer distribution: {dict(answer_counts)}")
-            
-            # Check for suspicious patterns
-            total_valid = sum(answer_counts.values())
-            if total_valid > 0:
-                max_percentage = max(answer_counts.values()) / total_valid * 100
-                if max_percentage > 60:
-                    self.logger.warning(f"Suspicious answer distribution: {max_percentage:.1f}% of answers are the same")
+            try:
+                from collections import Counter
+                answer_counts = Counter([a for a in answers if a])
+                self.logger.info(f"Answer distribution: {dict(answer_counts)}")
+                
+                # Check for suspicious patterns
+                total_valid = sum(answer_counts.values())
+                if total_valid > 0:
+                    max_percentage = max(answer_counts.values()) / total_valid * 100
+                    if max_percentage > 60:
+                        self.logger.warning(f"Suspicious answer distribution: {max_percentage:.1f}% of answers are the same")
+            except Exception as e:
+                self.logger.error(f"Error analyzing answer distribution: {e}")
         
         return answers
 
@@ -1165,7 +1176,7 @@ Begin answering now:
             
             # Create LLM
             llm = LiteLLMModel(
-                model_id=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+                model_id=os.getenv("AGENT_MODEL", "gpt-4.1"),
                 api_key=os.getenv("OPENAI_API_KEY")
             )
             

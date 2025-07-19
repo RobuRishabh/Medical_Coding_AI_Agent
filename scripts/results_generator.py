@@ -30,7 +30,7 @@ class ResultsGenerator:
             ## Detailed Question Analysis
         """
         
-        # Add detailed question-by-question results
+        # Detailed question-by-question results
         for result in self.results['detailed_results']:
             report += f"""
                 ### Question {result['question_number']}
