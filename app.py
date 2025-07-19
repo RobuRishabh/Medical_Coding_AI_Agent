@@ -4,73 +4,55 @@ import json
 import logging
 import re
 from dotenv import load_dotenv
-from smolagents import CodeAgent
-from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool, TOOL_NAMES
+from smolagents import LiteLLMModel
+from smolagents import ToolCallingAgent
+from scripts.smolagent_tools import knowledge_base_retriever, web_search_tool
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from datetime import datetime
 import litellm
 from pathlib import Path
 
-# ───────────────────────────────────────────────
-# LOGGING SETUP - Single Output.log file (overwrite mode)
-# ───────────────────────────────────────────────
-# Ensure Outputs directory exists
+# ─────────────────────────────
+# LOGGING SETUP
+# ─────────────────────────────
 outputs_dir = Path("Outputs")
 outputs_dir.mkdir(exist_ok=True)
-
-# Clear any existing handlers to avoid conflicts
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
-
-# Configure logging to write to Output.log (overwrite each time)
 log_file_path = outputs_dir / "Output.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(str(log_file_path), mode='w', encoding='utf-8'),  # 'w' mode overwrites the file
+        logging.FileHandler(str(log_file_path), mode='w', encoding='utf-8'),
         logging.StreamHandler()
     ],
-    force=True  # Force reconfiguration
+    force=True
 )
-
 logger = logging.getLogger(__name__)
-
-# Test logging immediately
 logger.info("=== Medical Coding AI Agent Application Started ===")
 logger.info(f"Log file location: {log_file_path.absolute()}")
 logger.info(f"Current working directory: {os.getcwd()}")
 
-# ───────────────────────────────────────────────
-# STREAMLIT PAGE CONFIG WITH TIMEOUT SETTINGS
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# STREAMLIT CONFIG & ENV
+# ─────────────────────────────
 st.set_page_config(
     page_title="CPC Medical Coding Assistant",
     page_icon="🩺",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-logger.info("Streamlit page config set successfully")
-
-# Configure Streamlit for long-running processes
-import streamlit.web.cli as stcli
-import sys
-
-# Set unlimited timeout for long processes
 os.environ["STREAMLIT_SERVER_MAX_UPLOAD_SIZE"] = "1000"
 os.environ["STREAMLIT_SERVER_MAX_MESSAGE_SIZE"] = "1000"
 os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+logger.info("Streamlit page config and environment variables set")
 
-logger.info("Streamlit environment variables configured")
-
-# ───────────────────────────────────────────────
-# LOAD ENV VARIABLES
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# ENV VARIABLES
+# ─────────────────────────────
 load_dotenv()
 logger.info("Environment variables loaded")
-
-# Check for required environment variables
 required_vars = ["OPENAI_API_KEY", "AGENT_MODEL"]
 for var in required_vars:
     if os.getenv(var):
@@ -78,9 +60,9 @@ for var in required_vars:
     else:
         logger.warning(f"Environment variable {var} is not set")
 
-# ───────────────────────────────────────────────
-# Load system prompt
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# PROMPT LOADER
+# ─────────────────────────────
 def load_system_prompt(path="prompts.json") -> str:
     logger.info(f"Loading system prompt from {path}")
     try:
@@ -92,288 +74,132 @@ def load_system_prompt(path="prompts.json") -> str:
     except Exception as e:
         logger.error(f"Failed to load system prompt: {e}")
         st.error(f"Failed to load system prompt: {e}")
-        return "You are a medical coding assistant."
+    return "You are a medical coding assistant."
 
-# ───────────────────────────────────────────────
-# AGENT CREATION WITHOUT CACHING
-# ───────────────────────────────────────────────
-def create_fast_agent(use_knowledge_base: bool = True, use_web_search: bool = True):
-    """Create a fast agent without caching"""
-    logger.info("Creating fast agent...")
-    
+# ─────────────────────────────
+# AGENT CREATION (NO WRAPPER)
+# ─────────────────────────────
+def create_fast_agent(use_knowledge_base=True, use_web_search=True):
+    logger.info("Creating fast agent with ToolCallingAgent (no wrapper)...")
     try:
-        # Use LiteLLM wrapper for faster responses
-        llm_wrapper = LiteLLMWrapper(
-            model_name=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
-        
-        # Select tools based on parameters
+        base_prompt = load_system_prompt()
+        tool_names = []
+        if use_web_search:
+            tool_names.append(web_search_tool.name)
+        if use_knowledge_base:
+            tool_names.append(knowledge_base_retriever.name)
+        try:
+            enhanced_system_prompt = base_prompt.format(tool_names=tool_names)
+        except Exception as e:
+            print(f"Error occurred while formatting prompt: {e}")
+            enhanced_system_prompt = base_prompt  # fallback
+
         selected_tools = []
         if use_web_search:
             selected_tools.append(web_search_tool)
         if use_knowledge_base:
             selected_tools.append(knowledge_base_retriever)
-        
-        logger.info(f"Creating agent with {len(selected_tools)} tools")
-        
-        # Create agent with performance optimizations
-        agent = CodeAgent(
-            tools=selected_tools,
-            model=llm_wrapper,
-            max_steps=1,  # Keep this low for speed
-            additional_authorized_imports=["re", "json", "os"]
+
+        prompt_templates = {
+            "system_prompt": enhanced_system_prompt,
+            "planning": {
+                "initial_plan": "",
+                "update_plan_pre_messages": "",
+                "update_plan_post_messages": "",
+            },
+            "managed_agent": {
+                "task": "",
+                "report": "",
+            },
+            "final_answer": {
+                "pre_messages": "",
+                "post_messages": "",
+            },
+        }
+        llm = LiteLLMModel(
+            model_id=os.getenv("AGENT_MODEL"),
+            api_key=os.getenv("OPENAI_API_KEY")
         )
-        
-        # Load and set optimized system prompt
-        system_prompt = load_system_prompt()
-        tool_names = [tool.name for tool in selected_tools]
-        enhanced_system_prompt = system_prompt.format(tool_names=tool_names)
-        
-        # Set the system prompt
-        agent.prompt_templates["system_prompt"] = enhanced_system_prompt
-        
-        logger.info("Fast agent created successfully")
+
+        agent = ToolCallingAgent(
+            tools=selected_tools,
+            model=llm,
+            max_steps=2,
+            planning_interval=None,
+            prompt_templates=prompt_templates
+        )
+        logger.info("Fast ToolCallingAgent created successfully")
         return agent
-        
+
     except Exception as e:
-        logger.error(f"Failed to create fast agent: {e}")
-        st.error(f"Failed to create fast agent: {e}")
+        logger.error(f"Failed to create fast ToolCallingAgent: {e}")
+        st.error(f"Failed to create fast ToolCallingAgent: {e}")
         return None
 
 def create_test_optimized_agent():
-    """Create agent specifically optimized for test taking"""
-    logger.info("Creating test-optimized agent...")
-    
+    logger.info("Creating test-optimized ToolCallingAgent (no wrapper)...")
     try:
-        # Use faster model settings for test taking
-        llm_wrapper = LiteLLMWrapper(
-            model_name=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
+        with open("prompts.json", encoding="utf-8") as f:
+            test_prompt = json.load(f).get("PRACTICE_TEST_PROMPT")
+        selected_tools = [knowledge_base_retriever, web_search_tool]
+        prompt_templates = {
+            "system_prompt": test_prompt,
+            "planning": {
+                "initial_plan": "",
+                "update_plan_pre_messages": "",
+                "update_plan_post_messages": "",
+            },
+            "managed_agent": {
+                "task": "",
+                "report": "",
+            },
+            "final_answer": {
+                "pre_messages": "",
+                "post_messages": "",
+            },
+        }
+        llm = LiteLLMModel(
+            model_id=os.getenv("AGENT_MODEL", "gpt-3.5-turbo"),
             api_key=os.getenv("OPENAI_API_KEY")
         )
-        
-        # For tests, we want both tools for maximum accuracy
-        selected_tools = [knowledge_base_retriever, web_search_tool]
-        
-        # Create agent with test-specific optimizations
-        agent = CodeAgent(
+
+        agent = ToolCallingAgent(
             tools=selected_tools,
-            model=llm_wrapper,
-            max_steps=1,  # Single step for faster responses
-            additional_authorized_imports=["re", "json", "os"]
+            model=llm,
+            max_steps=2,
+            planning_interval=None,
+            prompt_templates=prompt_templates
         )
-        
-        # Load test-specific system prompt
-        try:
-            with open("prompts.json", "r", encoding="utf-8") as file:
-                prompts = json.load(file)
-            test_prompt = prompts.get("PRACTICE_TEST_PROMPT", "")
-            if test_prompt:
-                agent.prompt_templates["system_prompt"] = test_prompt
-        except Exception as e:
-            logger.warning(f"Could not load test prompt: {e}")
-        
-        logger.info("Test-optimized agent created successfully")
+        logger.info("Test ToolCallingAgent created successfully")
         return agent
-        
     except Exception as e:
-        logger.error(f"Failed to create test-optimized agent: {e}")
+        logger.error(f"Failed to create test-optimized ToolCallingAgent: {e}")
         return None
 
-# ───────────────────────────────────────────────
-# LITELLM WRAPPER WITHOUT CACHING
-# ───────────────────────────────────────────────
-class LiteLLMWrapper:
-    def __init__(self, model_name, api_key=None):
-        self.model_name = model_name
-        if api_key:
-            litellm.api_key = api_key
-        
-        # Optimizations for speed
-        litellm.request_timeout = 30
-        litellm.max_retries = 1
-        
-        # Set model-specific optimizations
-        if "gpt-3.5" in model_name:
-            self.default_max_tokens = 800
-        elif "gpt-4" in model_name:
-            self.default_max_tokens = 1000
-        elif "nano" in model_name.lower():
-            self.default_max_tokens = 600
-        else:
-            self.default_max_tokens = 600
-        
-        logger.info(f"LiteLLM optimized for speed with model: {model_name}")
-
-    def convert_messages(self, messages):
-        """Convert messages to LiteLLM format"""
-        if not isinstance(messages, list):
-            messages = [messages]
-            
-        converted = []
-        for msg in messages:
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "content", None)
-
-            if role == "user":
-                converted.append({"role": "user", "content": content})
-            elif role == "assistant":
-                converted.append({"role": "assistant", "content": content})
-            elif role == "system":
-                converted.append({"role": "system", "content": content})
-            elif hasattr(role, 'value') and role.value == 'tool-response':
-                if isinstance(content, list) and len(content) > 0:
-                    text_content = content[0].get('text', str(content))
-                else:
-                    text_content = str(content)
-                converted.append({"role": "user", "content": text_content})
-            else:
-                if isinstance(content, list) and len(content) > 0:
-                    text_content = content[0].get('text', str(content))
-                else:
-                    text_content = str(content)
-                converted.append({"role": "user", "content": text_content})
-        
-        return converted
-
-    def generate(self, messages, **kwargs):
-        try:
-            # Convert messages to LiteLLM format
-            litellm_messages = self.convert_messages(messages)
-            
-            # Parameters for speed
-            litellm_kwargs = {
-                'model': self.model_name,
-                'messages': litellm_messages,
-                'temperature': kwargs.get('temperature', 0.1),
-                'max_tokens': kwargs.get('max_tokens', self.default_max_tokens),
-                'timeout': 30,
-                'stream': False,
-            }
-            
-            # Add frequency penalty to reduce repetition (if supported by model)
-            if "gpt" in self.model_name:
-                litellm_kwargs['frequency_penalty'] = 0.1
-            
-            # Make the API call
-            response = litellm.completion(**litellm_kwargs)
-            
-            # Extract content from response
-            content = response.choices[0].message.content
-            
-            # Minimal post-processing for speed
-            content = re.sub(r'```(?:python|tool_code)?\s*\n(.*?)\n```', r'<code>\1</code>', content, flags=re.DOTALL)
-            
-            # Create result object
-            class LiteLLMResult:
-                def __init__(self, content, response_obj):
-                    self.content = content
-                    self.tool_calls = None
-                    
-                    # Token usage tracking
-                    usage = getattr(response_obj, 'usage', None)
-                    if usage:
-                        class TokenUsage:
-                            def __init__(self, usage_data):
-                                self.input_tokens = getattr(usage_data, 'prompt_tokens', 0)
-                                self.output_tokens = getattr(usage_data, 'completion_tokens', 0)
-                                self.total_tokens = getattr(usage_data, 'total_tokens', 0)
-                        self.token_usage = TokenUsage(usage)
-                    else:
-                        class TokenUsage:
-                            def __init__(self):
-                                self.input_tokens = 0
-                                self.output_tokens = 0
-                                self.total_tokens = 0
-                        self.token_usage = TokenUsage()
-            
-            return LiteLLMResult(content=content, response_obj=response)
-            
-        except Exception as e:
-            logger.error(f"LiteLLM.generate failed: {e}")
-            raise
-
-    def invoke(self, messages, **kwargs):
-        """Compatibility method for LangChain-style invoke"""
-        result = self.generate(messages, **kwargs)
-        
-        class SimpleResponse:
-            def __init__(self, content):
-                self.content = content
-        
-        return SimpleResponse(result.content)
-
-# ───────────────────────────────────────────────
-# BACKWARD COMPATIBILITY
-# ───────────────────────────────────────────────
-def create_dynamic_agent(use_knowledge_base=True, use_web_search=True):
-    """Create dynamic agent without caching"""
-    logger.info(f"Creating dynamic agent - KB: {use_knowledge_base}, Web: {use_web_search}")
-    return create_fast_agent(use_knowledge_base, use_web_search)
-
-# ───────────────────────────────────────────────
-# Initialize Model with LiteLLM
-# ───────────────────────────────────────────────
-def initialize_model():
-    logger.info("Initializing LiteLLM language model...")
-    try:
-        model_name = os.getenv("AGENT_MODEL", "gpt-3.5-turbo")
-        api_key = os.getenv("OPENAI_API_KEY")
-        
-        # Create LiteLLM wrapper
-        llm = LiteLLMWrapper(model_name, api_key)
-        
-        logger.info(f"LiteLLM model initialized successfully: {model_name}")
-        return llm
-    except Exception as e:
-        logger.error(f"Failed to initialize LiteLLM model: {e}")
-        st.error(f"Failed to initialize model: {e}")
-        return None
-
-# ───────────────────────────────────────────────
-# Initialize Agent
-# ───────────────────────────────────────────────
 def initialize_base_agent():
     logger.info("Initializing base agent...")
-    llm = initialize_model()
-    if not llm:
-        logger.error("Failed to initialize model for base agent")
-        return None, None
-    
     try:
-        logger.info("Creating base agent components...")
         system_prompt = load_system_prompt()
-        
-        # Debug: Check available tools
         logger.info(f"knowledge_base_retriever: {knowledge_base_retriever}")
         logger.info(f"web_search_tool: {web_search_tool}")
-        
-        # Log tool names if they have a name attribute
         if hasattr(knowledge_base_retriever, 'name'):
             logger.info(f"Knowledge base tool name: {knowledge_base_retriever.name}")
         if hasattr(web_search_tool, 'name'):
             logger.info(f"Web search tool name: {web_search_tool.name}")
-        
         logger.info("Base agent components created successfully")
-        return llm, system_prompt
+        return os.getenv("AGENT_MODEL", "gpt-3.5-turbo"), system_prompt
     except Exception as e:
         logger.error(f"Failed to create base agent: {e}")
         st.error(f"Failed to create base agent: {e}")
         return None, None
 
+# ─────────────────────────────
+# UTILITIES (CITATIONS, ETC.)
+# ─────────────────────────────
 def extract_citations_from_response(response_text, agent):
-    """Extract and format citations from agent response"""
-    citations = {
-        'web_sources': [],
-        'knowledge_base_sources': []
-    }
-    
-    # Try to extract citations from the response text
+    citations = {'web_sources': [], 'knowledge_base_sources': []}
     if "**Sources:**" in response_text:
-        # Parse existing citations
         sources_section = response_text.split("**Sources:**")[1] if "**Sources:**" in response_text else ""
-        
-        # Extract web sources
         web_pattern = r'- Web Search: \[([^\]]+)\]\(([^)]+)\)(.*)'
         web_matches = re.findall(web_pattern, sources_section)
         for match in web_matches:
@@ -382,8 +208,6 @@ def extract_citations_from_response(response_text, agent):
                 'url': match[1],
                 'description': match[2].strip(' -')
             })
-        
-        # Extract knowledge base sources
         kb_pattern = r'- Knowledge Base: ([^,]+), Section: "([^"]+)"(.*)'
         kb_matches = re.findall(kb_pattern, sources_section)
         for match in kb_matches:
@@ -392,46 +216,52 @@ def extract_citations_from_response(response_text, agent):
                 'section': match[1],
                 'description': match[2].strip(' -')
             })
-    
     return citations
 
 def display_enhanced_sources(response_text, use_knowledge_base, use_web_search):
-    """Display which tools were used"""
     st.markdown("---")
     st.subheader("🔧 Tools Used")
-    
-    # Tool usage summary
     col_ref1, col_ref2 = st.columns(2)
-    
     with col_ref1:
         if use_knowledge_base:
             st.success("✅ Knowledge Base Used")
         else:
             st.info("➖ Knowledge Base Not Used")
-    
     with col_ref2:
         if use_web_search:
             st.success("✅ Web Search Used")
         else:
             st.info("➖ Web Search Not Used")
 
+def safe_extract_response(raw_response):
+    # Simple placeholder for actual extraction (adapt as needed)
+    if isinstance(raw_response, str):
+        return raw_response
+    elif hasattr(raw_response, 'content'):
+        return raw_response.content
+    elif isinstance(raw_response, dict) and 'content' in raw_response:
+        return raw_response['content']
+    elif isinstance(raw_response, dict) and 'choices' in raw_response:
+        # Standard OpenAI API style
+        return raw_response['choices'][0]['message']['content']
+    return str(raw_response)
+
+def clean_response_text(response_text):
+    # Any extra cleaning you want to do
+    return response_text.strip()
+
+# ─────────────────────────────
+# CHAT INTERFACE
+# ─────────────────────────────
 def chat_interface():
-    """Chat interface page"""
     logger.info("Rendering chat interface")
     st.title("🩺 CPC Medical Coding Assistant - Chat Interface")
     st.markdown("---")
-    
-    # Main interface
     col1, col2 = st.columns([2, 1])
-
     with col1:
         st.header("💬 Ask Your Question")
-        
-        # Initialize session state for question if not exists
         if 'current_question' not in st.session_state:
             st.session_state.current_question = ""
-        
-        # Input area
         question = st.text_area(
             "Enter your medical coding question:",
             placeholder="e.g., What is the CPT code for a routine colonoscopy?",
@@ -439,91 +269,60 @@ def chat_interface():
             value=st.session_state.current_question,
             key="chat_question_input"
         )
-        
-        # Update session state when text area changes
         if question != st.session_state.current_question:
             st.session_state.current_question = question
-        
-        # Example questions
         st.subheader("💡 Example Questions")
         examples = [
             "How do I code a chest X-ray with interpretation?",
             "What ICD-10 code should I use for Type 2 diabetes?",
             "What's the difference between CPT 99213 and 99214?",
         ]
-        
         for i, example in enumerate(examples):
             if st.button(f"📝 {example}", key=f"chat_example_{i}"):
                 st.session_state.current_question = example
                 st.rerun()
-
     with col2:
         st.header("⚙️ Options")
-        # Web search is always enabled (can't be turned off)
         st.markdown("🌐 **Web Search**: Always Enabled")
         st.info("Web search is always active to provide the most current information.")
-        use_web_search = True  # Always True
-        
-        # Search options
+        use_web_search = True
         use_knowledge_base = st.checkbox("🔍 Search Knowledge Base", value=True, key="chat_use_kb")
         st.info("Knowledge base search is optional. Uncheck to skip searching the embedded documents.")
-        # Display options
         show_sources = st.checkbox("📖 Show Sources", value=True, key="chat_show_sources")
-
-    # Submit button
     if st.button("🚀 Get Answer", type="primary", use_container_width=True, key="chat_get_answer"):
         if not st.session_state.current_question.strip():
             st.warning("Please enter a question!")
             logger.warning("User tried to submit empty question")
             return
-        
         logger.info(f"User submitted question: {st.session_state.current_question[:100]}...")
-        
-        # Check if base components are ready
         llm, system_prompt = initialize_base_agent()
         if not llm or not system_prompt:
             st.error("❌ Agent Failed to Initialize")
             logger.error("Failed to initialize base agent for chat")
             return
-        
-        # Show processing
         with st.spinner("🔄 Processing your question..."):
             try:
                 logger.info(f"Processing query: {st.session_state.current_question}")
                 logger.info(f"Using tools - Knowledge Base: {use_knowledge_base}, Web Search: {use_web_search}")
-                
-                # Create agent with selected tools
-                agent = create_dynamic_agent(use_knowledge_base, use_web_search)
+                agent = create_fast_agent(use_knowledge_base, use_web_search)
                 if not agent:
                     st.error("Failed to create agent with selected tools")
-                    logger.error("Failed to create dynamic agent")
+                    logger.error("Failed to create fast agent")
                     return
-                
-                # Get response from agent
-                response = agent.run(st.session_state.current_question)
-                
-                # Display results
+                raw_response = agent.run(st.session_state.current_question)
+                response_text = safe_extract_response(raw_response)
+                response_text = clean_response_text(response_text)
                 st.markdown("---")
                 st.header("🤖 Answer")
-                
-                # Format and display response
-                if isinstance(response, str):
-                    st.markdown(response)
-                    response_text = response
-                else:
-                    st.write(response)
-                    response_text = str(response)
-                
-                # Show enhanced sources and references if requested
+                st.markdown(response_text)
                 if show_sources:
                     display_enhanced_sources(response_text, use_knowledge_base, use_web_search)
-                
                 logger.info("Query processed successfully")
-                
             except Exception as e:
                 logger.error(f"Error processing query: {e}")
                 st.error(f"⚠️ Error: {str(e)}")
                 st.info("Please try rephrasing your question or check the system logs.")
+
 
 def practice_test_interface():
     """Interface for automated practice test"""
